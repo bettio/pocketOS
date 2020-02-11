@@ -21,8 +21,8 @@ init(_) ->
 handle_call(_C, _From, State) ->
     {reply, error, State}.
 
-handle_info({keyboard_event, KeyCode, KeyDown, EventTS}, State) ->
-    erlang:display([KeyCode]),
+handle_info({keyboard_event, KeyCode, KeyDown, EventTS} = Event, State) ->
+    erlang:display(Event),
     {noreply, State}.
 
 terminate(_Reason, _State) ->
