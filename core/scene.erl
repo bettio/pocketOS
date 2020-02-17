@@ -5,53 +5,20 @@ start() ->
     {ok, Display} = display:start(),
     register(display, Display),
     {ok, Input} = input:start(),
-    InitState = 'Elixir.InputBox':init(),
-    Scene = 'Elixir.InputBox':render(InitState),
 
-    KE = [
-{keyboard_event,99,true,758},
-{keyboard_event,99,false,849},
-{keyboard_event,105,true,849},
-{keyboard_event,105,false,919},
-{keyboard_event,97,true,1009},
-{keyboard_event,111,true,1090},
-{keyboard_event,97,false,1110},
-{keyboard_event,111,false,1150},
-{keyboard_event,32,true,1292},
-{keyboard_event,32,false,1392},
-{keyboard_event,115,true,1483},
-{keyboard_event,111,true,1554},
-{keyboard_event,115,false,1564},
-{keyboard_event,111,false,1626},
-{keyboard_event,110,true,1737},
-{keyboard_event,110,false,1797},
-{keyboard_event,111,true,1888},
-{keyboard_event,111,false,1948},
-{keyboard_event,32,true,1989},
-{keyboard_event,32,false,2119},
-{keyboard_event,100,true,2119},
-{keyboard_event,100,false,2190},
-{keyboard_event,97,true,2301},
-{keyboard_event,97,false,2381},
-{keyboard_event,118,true,2492},
-{keyboard_event,118,false,2573},
-{keyboard_event,105,true,2573},
-{keyboard_event,105,false,2655},
-{keyboard_event,100,true,2675},
-{keyboard_event,100,false,2746},
-{keyboard_event,101,true,2836},
-{keyboard_event,101,false,2907},
-{keyboard_event,13,true,4106},
-{keyboard_event,13,false,4197}
-         ],
+    InitState = 'Elixir.IconsMenu':init(),
+    Scene = 'Elixir.IconsMenu':render(InitState),
+
+    %InitState = 'Elixir.InputBox':init(),
+    %Scene = 'Elixir.InputBox':render(InitState),
 
     %{noreply_render, NewState, NewScene} = 'Elixir.InputBox':handle({keyboard_event,99,true,758}, InitState),
-    
+    %{noreply_render, NewState, NewScene} = 'Elixir.IconsMenu':handle({keyboard_event,19,true,1991}, InitState),
+
     draw(Display, Scene),
-    GBEmu = open_port({spawn, "gbemu"}, []),
 
     UART = uart:open("UART0", []),
-    loop(GBEmu, UART).
+     loop(UART, Display, InitState).
 
 render_message(info, Title, Text) ->
     render_message(icons64:info_icon(), Title, Text);
@@ -96,9 +63,9 @@ render_options([Text | Options], Selected, Index) ->
         render_options(Options, Selected, Index + 1)
     ].
 
-loop(GBEmu, UART) ->
+loop(UART, Display, State) ->
     {ok, R} = uart:read(UART),
-    erlang:display(R),
+    erlang:display({recvbin, R}),
     Msg =
     case erlang:binary_to_list(R) of
             % Serial / simulation
@@ -106,19 +73,24 @@ loop(GBEmu, UART) ->
             "e" -> {button, select, press};
             "a" -> {button, a, press};
             "b" -> {button, b, press};
-            [27, 91, 68] -> {button, left, press};
+            [27, 91, 68] ->  {keyboard_event,19,true,1991}; %{button, left, press};
             [27, 91, 65] -> {button, up, press};
-            [27, 91, 67] -> {button, right, press};
+            [27, 91, 67] -> {keyboard_event,19,true,1991}; %{button, right, press};
             [27, 91, 66] -> {button, down, press};
 
             % Real hardware
             [16#FC, 16#00, 16#02, 16#00, 16#FE] -> {button, down, press};
             Any -> {none}
         end,
-    erlang:display(ok),
-    avm_gen_server:call(GBEmu, Msg, 60000),
-    erlang:display(done),
-    loop(GBEmu, UART).
+    erlang:display(Msg),
+
+    erlang:display(ready),
+    {noreply_render, NewState, NewScene} = 'Elixir.IconsMenu':handle(Msg, State),
+    erlang:display(go),
+
+    draw(Display, NewScene),
+
+    loop(UART, Display, NewState).
 
 draw(_Display, []) ->
     ok;
