@@ -73,10 +73,10 @@ loop(UART, Display, State) ->
             "e" -> {button, select, press};
             "a" -> {button, a, press};
             "b" -> {button, b, press};
-            [27, 91, 68] ->  {keyboard_event,19,true,1991}; %{button, left, press};
-            [27, 91, 65] -> {button, up, press};
+            [27, 91, 68] -> {keyboard_event,20,true,1991}; %{button, left, press};
+            [27, 91, 65] -> {keyboard_event,17,true,1991}; %{button, up, press};
             [27, 91, 67] -> {keyboard_event,19,true,1991}; %{button, right, press};
-            [27, 91, 66] -> {button, down, press};
+            [27, 91, 66] -> {keyboard_event,18,true,1991}; %{button, down, press};
 
             % Real hardware
             [16#FC, 16#00, 16#02, 16#00, 16#FE] -> {button, down, press};
