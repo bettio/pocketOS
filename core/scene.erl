@@ -78,6 +78,8 @@ loop(UART, Display, State) ->
             [27, 91, 67] -> {keyboard_event,19,true,1991}; %{button, right, press};
             [27, 91, 66] -> {keyboard_event,18,true,1991}; %{button, down, press};
 
+            [13] -> {keyboard_event,13,true,1991};
+
             % Real hardware
             [16#FC, 16#00, 16#02, 16#00, 16#FE] -> {button, down, press};
             Any -> {none}
@@ -85,7 +87,7 @@ loop(UART, Display, State) ->
     erlang:display(Msg),
 
     erlang:display(ready),
-    {noreply_render, NewState, NewScene} = 'Elixir.IconsMenu':handle(Msg, State),
+    {noreply_render, NewScene, NewState} = 'Elixir.IconsMenu':handle(Msg, State),
     erlang:display(go),
 
     draw(Display, NewScene),
