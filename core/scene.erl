@@ -6,6 +6,8 @@ start() ->
     register(display, Display),
     {ok, Input} = input:start(),
 
+    MainMenu = 'Elixir.MainMenu':start(),
+
     InitState = 'Elixir.IconsMenu':init(),
     Scene = 'Elixir.IconsMenu':render(InitState),
 

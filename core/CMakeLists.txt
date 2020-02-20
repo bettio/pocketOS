@@ -11,6 +11,7 @@ compile_erlang(scene)
 compile_elixir(main.ex Elixir.Main.beam)
 compile_elixir(icons_menu.ex Elixir.IconsMenu.beam)
 compile_elixir(input_box.ex Elixir.InputBox.beam)
+compile_elixir(main_menu.ex Elixir.MainMenu.beam)
 #compile_elixir(keyboard_parser.ex Elixir.KeyboardParser.beam)
 
 pack_deps(deps.avm
@@ -23,6 +24,7 @@ pack_beam(pocketos.avm
     Elixir.Main.beam
     Elixir.IconsMenu.beam
     Elixir.InputBox.beam
+    Elixir.MainMenu.beam
 #    Elixir.KeyboardParser.beam
     scene.beam
     display.beam
