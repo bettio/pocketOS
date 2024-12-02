@@ -1,10 +1,10 @@
 -module(gps_server).
--export([start/1]).
+-export([start/3]).
 
-start(Fun) ->
+start(UART_DEVICE, UART_OPTIONS, Fun) ->
     {ok,
         spawn(fun() ->
-            UART = uart:open("UART1", [{tx_pin, 43}, {rx_pin, 44}, {speed, 38400}]),
+            UART = uart:open(UART_DEVICE, UART_OPTIONS),
             read_uart(UART, Fun, <<>>, [])
         end)}.
 

@@ -253,4 +253,8 @@ defmodule HAL do
          }}
     end
   end
+
+  defp get_peripheral_config("t-deck", "gps") do
+    {:ok, %{device: "UART1", config: [tx_pin: 43, rx_pin: 44, speed: 38400]}}
+  end
 end

@@ -272,7 +272,12 @@ defmodule UI.Map do
     :avm_pubsub.sub(:avm_pubsub, [:gps])
 
     if HAL.has_peripheral?("gps") do
-      {:ok, pid} = :gps_server.start(fn t -> :avm_pubsub.pub(:avm_pubsub, [:gps], t) end)
+      {:ok, gps_config} = HAL.get_peripheral_config("gps")
+
+      {:ok, pid} =
+        :gps_server.start(gps_config.device, gps_config.options, fn t ->
+          :avm_pubsub.pub(:avm_pubsub, [:gps], t)
+        end)
     end
 
     pos = {0, 0.0, 0.0}
