@@ -1,8 +1,3 @@
-alias PhotonUI.Widgets.Container
-alias PhotonUI.Widgets.TextInputState
-alias PhotonUI.UIServer
-alias UI.Terminal.TermWidget
-
 defmodule WASMLauncher do
   @compile {:no_warn_undefined, :atomvm}
 

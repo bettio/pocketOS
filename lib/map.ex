@@ -1,11 +1,9 @@
 alias PhotonUI.Widgets.Button
 alias PhotonUI.Widgets.Container
-alias PhotonUI.Widgets.IconListView
 alias PhotonUI.Widgets.Image
 alias PhotonUI.Widgets.VerticalLayout
 alias PhotonUI.Widgets.Rectangle
 alias PhotonUI.Widgets.Text
-alias PhotonUI.Widgets.TextInput
 alias PhotonUI.UIServer
 
 defmodule UI.Map do
