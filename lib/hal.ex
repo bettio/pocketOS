@@ -1,4 +1,6 @@
 defmodule HAL do
+  @compile {:no_warn_undefined, :esp}
+  @compile {:no_warn_undefined, :gpio}
   @compile {:no_warn_undefined, :spi}
 
   # @platform "linux"

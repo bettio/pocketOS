@@ -9,6 +9,11 @@ alias PhotonUI.Widgets.TextInput
 alias PhotonUI.UIServer
 
 defmodule UI.Map do
+  @compile {:no_warn_undefined, :ahttp_client}
+  @compile {:no_warn_undefined, :atomvm}
+  @compile {:no_warn_undefined, :avm_pubsub}
+  @compile {:no_warn_undefined, :port}
+
   def get_ui(pos, alt, n_sats, display_server) do
     avail_mem =
       try do

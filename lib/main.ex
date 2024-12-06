@@ -1,4 +1,12 @@
 defmodule Main do
+  @compile {:no_warn_undefined, :alisp}
+  @compile {:no_warn_undefined, :ahttp_client}
+  @compile {:no_warn_undefined, :avm_pubsub}
+  @compile {:no_warn_undefined, :network}
+  @compile {:no_warn_undefined, :sexp_lexer}
+  @compile {:no_warn_undefined, :sexp_parser}
+  @compile {:no_warn_undefined, :port}
+
   def start() do
     :erlang.display("Hello.")
 

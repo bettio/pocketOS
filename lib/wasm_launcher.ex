@@ -4,6 +4,8 @@ alias PhotonUI.UIServer
 alias UI.Terminal.TermWidget
 
 defmodule WASMLauncher do
+  @compile {:no_warn_undefined, :atomvm}
+
   def start(file) do
     IO.puts("Going to launch WASM #{file}")
 

@@ -1,4 +1,5 @@
 defmodule StackedFS do
+  @compile {:no_warn_undefined, :atomvm}
   @build_env Mix.env()
 
   def open(file_server, file_path, mode) do
