@@ -35,7 +35,7 @@ defmodule UI.Terminal do
     UIServer.start_monitor(__MODULE__, args, opts)
   end
 
-  def init([{:mf, {module, function}} | _t] = opts) do
+  def init([{:mf, {module, function}} | _t] = _opts) do
     leader = self()
 
     spawn(fn ->
@@ -46,7 +46,7 @@ defmodule UI.Terminal do
     {:ok, {@ui, %{}}, %__MODULE__{}}
   end
 
-  def init([{:mfa, {module, function, args}} | _t] = opts) do
+  def init([{:mfa, {module, function, args}} | _t] = _opts) do
     leader = self()
 
     spawn(fn ->

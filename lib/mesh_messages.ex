@@ -135,7 +135,7 @@ defmodule UI.MeshMessages do
     {:noreply, updated_ui, new_state}
   end
 
-  def handle_info(msg, ui, state) do
+  def handle_info(msg, _ui, state) do
     :erlang.display({:handle_info, msg})
     {:noreply, state}
   end

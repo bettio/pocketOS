@@ -62,7 +62,7 @@ defmodule StackedFS do
             :atomvm.posix_read(file, bytes)
           end
 
-        {:ok, data} = result
+        {:ok, _data} = result
         {:reply, result, state}
 
       _not_open ->
@@ -80,7 +80,7 @@ defmodule StackedFS do
             :atomvm.posix_write(file, bytes)
           end
 
-        {:ok, count} = result
+        {:ok, _count} = result
         {:reply, result, state}
 
       _not_open ->

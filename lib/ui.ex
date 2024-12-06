@@ -90,7 +90,7 @@ defmodule UI do
     {:noreply, state}
   end
 
-  def handle_info({:DOWN, ref, :process, pid, {err_data, _}}, state) do
+  def handle_info({:DOWN, _ref, :process, _pid, {err_data, _}}, state) do
     error_image = ImageState.load_image({:pocket_os, "icons/status/critical.rgba"})
     {title, message} = error_description(err_data)
 

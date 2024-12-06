@@ -56,7 +56,7 @@ defmodule Main do
           IO.puts("WLAN AP ready. Waiting connections.\n")
           :ok
 
-        {:ok, {address, netmask, gateway} = ips} ->
+        {:ok, {_address, _netmask, _gateway} = ips} ->
           IO.puts("Acquired IP address:  #{inspect(ips)}\n")
           :ok
 

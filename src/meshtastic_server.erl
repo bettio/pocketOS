@@ -120,7 +120,7 @@ maybe_callback(undefined, _, _) ->
 maybe_callback(Mod, Callback, Arg) ->
     Mod:Callback(Arg).
 
-is_recipient(#{dest := Dest}, #state{node_id = NodeId} = State) ->
+is_recipient(#{dest := Dest}, #state{node_id = NodeId} = _State) ->
     case Dest of
         NodeId -> true;
         16#FFFFFFFF -> true;
@@ -129,7 +129,7 @@ is_recipient(#{dest := Dest}, #state{node_id = NodeId} = State) ->
 
 maybe_rebroadcast(#{dest := Dest}, #state{node_id = Dest} = State) ->
     State;
-maybe_rebroadcast(#{hop_limit := 0} = Packet, State) ->
+maybe_rebroadcast(#{hop_limit := 0} = _Packet, State) ->
     State;
 maybe_rebroadcast(
     #{hop_limit := HopLimit} = Packet, #state{radio = {_RadioId, RadioModule, Radio}} = State
@@ -159,7 +159,7 @@ prune_expired_last_seen(LastSeenMap, MonotonicSec) ->
         maps:map(
             fun(_Source, SeenPacketMap) ->
                 maps:filter(
-                    fun(PacketId, LastTimestamp) ->
+                    fun(_PacketId, LastTimestamp) ->
                         if
                             LastTimestamp + ?PACKET_SEEN_EXPIRY_SEC < MonotonicSec ->
                                 false;

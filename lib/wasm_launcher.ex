@@ -7,7 +7,7 @@ defmodule WASMLauncher do
     leader = :erlang.group_leader()
 
     wbin = :atomvm.read_priv(:pocket_os, file)
-    <<header::binary-size(4), _rest::binary>> = wbin
+    <<_header::binary-size(4), _rest::binary>> = wbin
 
     port = :erlang.open_port({:spawn, "wamr"}, wasm: wbin, start_paused: true)
 

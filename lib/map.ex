@@ -12,7 +12,7 @@ defmodule UI.Map do
   @compile {:no_warn_undefined, :avm_pubsub}
   @compile {:no_warn_undefined, :port}
 
-  def get_ui(pos, alt, n_sats, display_server) do
+  def get_ui(pos, alt, _n_sats, display_server) do
     avail_mem =
       try do
         "#{div(:erlang.system_info(:esp32_free_heap_size), 1024)} K"
@@ -277,7 +277,7 @@ defmodule UI.Map do
     if HAL.has_peripheral?("gps") do
       {:ok, gps_config} = HAL.get_peripheral_config("gps")
 
-      {:ok, pid} =
+      {:ok, _pid} =
         :gps_server.start(gps_config.device, gps_config.options, fn t ->
           :avm_pubsub.pub(:avm_pubsub, [:gps], t)
         end)
@@ -351,7 +351,7 @@ defmodule UI.Map do
   def do_get_tile_network(zoom, tile_x, tile_y) do
     {:ok, conn} = :ahttp_client.connect(:http, "tile.openstreetmap.org", 80, active: false)
 
-    {:ok, conn, ref} =
+    {:ok, conn, _ref} =
       :ahttp_client.request(
         conn,
         "GET",
@@ -414,7 +414,7 @@ defmodule UI.Map do
 
   def handle_info(
         {:pub, [:gps], _sender, %{sentence: :gsv, n_sats: n_sats} = got},
-        {wdg, old_state} = ui,
+        {wdg, old_state} = _ui,
         %{display_server: display_server, has_pos: has_pos} = state
       ) do
     unless has_pos do
@@ -425,7 +425,7 @@ defmodule UI.Map do
     end
   end
 
-  def handle_info(msg, ui, state) do
+  def handle_info(msg, _ui, state) do
     :erlang.display({:handle_info, msg})
     {:noreply, state}
   end

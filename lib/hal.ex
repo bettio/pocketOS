@@ -28,7 +28,7 @@ defmodule HAL do
   end
 
   def init("t-deck") do
-    gpio = :gpio.start()
+    _gpio = :gpio.start()
 
     board_power_on = 10
 
@@ -54,7 +54,7 @@ defmodule HAL do
     IO.puts("Mounting SD")
 
     with spi_host when spi_host != :undefined <- :erlang.whereis(:main_spi),
-         {:ok, ref} <- :esp.mount("sdspi", "/sdcard", :fat, spi_host: spi_host, cs: 39),
+         {:ok, _ref} <- :esp.mount("sdspi", "/sdcard", :fat, spi_host: spi_host, cs: 39),
          {:ok, _} <- FSRegistry.start_link(),
          {:ok, fs0} <- StackedFS.start_link("/sdcard/"),
          :ok <- FSRegistry.register_fs("FS0", fs0) do
