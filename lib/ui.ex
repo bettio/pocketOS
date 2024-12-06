@@ -70,16 +70,6 @@ defmodule UI do
     {:noreply, updated_state}
   end
 
-  defp error_description(foo) do
-    {"Error:", inspect(foo)}
-  end
-
-  defp error_description(%exception_type{} = ex) do
-    title = "#{exception_type}:"
-    message = Exception.message(ex)
-    {title, message}
-  end
-
   def handle_info({:DOWN, _ref, :process, pid, :normal}, %{menu_proc: pid} = state) do
     {:noreply, Map.delete(state, :menu_proc)}
   end
@@ -108,5 +98,15 @@ defmodule UI do
   def handle_info(msg, state) do
     :erlang.display({:handle_info, msg})
     {:noreply, state}
+  end
+
+  defp error_description(%exception_type{} = ex) do
+    title = "#{exception_type}:"
+    message = Exception.message(ex)
+    {title, message}
+  end
+
+  defp error_description(foo) do
+    {"Error:", inspect(foo)}
   end
 end

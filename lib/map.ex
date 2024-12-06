@@ -394,8 +394,7 @@ defmodule UI.Map do
   end
 
   def handle_info(
-        {:pub, [:gps], _sender,
-         %{sentence: sentence, lat: lat, lon: lon, data_status: :valid} = got},
+        {:pub, [:gps], _sender, %{sentence: sentence, lat: lat, lon: lon, data_status: :valid}},
         ui,
         state
       )
@@ -404,8 +403,7 @@ defmodule UI.Map do
   end
 
   def handle_info(
-        {:pub, [:gps], _sender,
-         %{sentence: :gga, lat: lat, lon: lon, alt: alt, n_sats: n_sats} = got},
+        {:pub, [:gps], _sender, %{sentence: :gga, lat: lat, lon: lon, alt: alt, n_sats: n_sats}},
         ui,
         state
       ) do
@@ -413,7 +411,7 @@ defmodule UI.Map do
   end
 
   def handle_info(
-        {:pub, [:gps], _sender, %{sentence: :gsv, n_sats: n_sats} = got},
+        {:pub, [:gps], _sender, %{sentence: :gsv, n_sats: n_sats}},
         {wdg, old_state} = _ui,
         %{display_server: display_server, has_pos: has_pos} = state
       ) do

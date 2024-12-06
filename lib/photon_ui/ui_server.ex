@@ -160,8 +160,6 @@ defmodule PhotonUI.Widgets.IconListView do
       model
       |> Enum.slice(page * rows_per_page, rows_per_page)
       |> Enum.reduce({0, acc}, fn v, {index, grid_acc} ->
-        img = images[index]
-        txt = v[:text]
         x_pos = origin_x + x
         y_pos = origin_y + y + cell_height * index
         icon_xpos = x_pos + 8
@@ -186,7 +184,7 @@ defmodule PhotonUI.Widgets.IconListView do
         {index + 1,
          [
            {:text, text_xpos, text_ypos, :default16px, text_color, bg_color, v[:text]},
-           {:image, icon_xpos, icon_ypos, bg_color, img}
+           {:image, icon_xpos, icon_ypos, bg_color, images[index]}
            | with_background
          ]}
       end)

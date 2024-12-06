@@ -138,21 +138,21 @@ maybe_rebroadcast(
     RadioModule:broadcast(Radio, RadioPayload),
     State.
 
+% returns: {AlreadySeen, UpdatedLastSeenMap}
 update_last_seen(LastSeenMap, Source, PacketId, MonotonicSec) ->
-    {AlreadySeen, UpdatedLastSeenMap} =
-        case LastSeenMap of
-            #{Source := #{PacketId := LastTimestamp} = SeenPacketMap} ->
-                if
-                    MonotonicSec > LastTimestamp ->
-                        {true, LastSeenMap#{Source => SeenPacketMap#{PacketId => MonotonicSec}}};
-                    true ->
-                        {true, LastSeenMap}
-                end;
-            #{Source := SeenPacketMap} ->
-                {false, LastSeenMap#{Source => SeenPacketMap#{PacketId => MonotonicSec}}};
-            _ ->
-                {false, LastSeenMap#{Source => #{PacketId => MonotonicSec}}}
-        end.
+    case LastSeenMap of
+        #{Source := #{PacketId := LastTimestamp} = SeenPacketMap} ->
+            if
+                MonotonicSec > LastTimestamp ->
+                    {true, LastSeenMap#{Source => SeenPacketMap#{PacketId => MonotonicSec}}};
+                true ->
+                    {true, LastSeenMap}
+            end;
+        #{Source := SeenPacketMap} ->
+            {false, LastSeenMap#{Source => SeenPacketMap#{PacketId => MonotonicSec}}};
+        _ ->
+            {false, LastSeenMap#{Source => #{PacketId => MonotonicSec}}}
+    end.
 
 prune_expired_last_seen(LastSeenMap, MonotonicSec) ->
     PrunedMap =

@@ -32,13 +32,12 @@ defmodule StackedFS do
       if @build_env == :test do
         :file.open(complete_path, [:binary | mode])
       else
-        posix_mode =
-          case mode do
-            [:read] -> :atomvm.posix_open(complete_path, [:o_rdonly])
-            [:write] -> :atomvm.posix_open(complete_path, [:o_wronly, :o_creat], 0o644)
-            [:read, :write] -> :atomvm.posix_open(complete_path, [:o_rdwr, :o_creat], 0o644)
-            [:write, :read] -> :atomvm.posix_open(complete_path, [:o_rdwr, :o_creat], 0o644)
-          end
+        case mode do
+          [:read] -> :atomvm.posix_open(complete_path, [:o_rdonly])
+          [:write] -> :atomvm.posix_open(complete_path, [:o_wronly, :o_creat], 0o644)
+          [:read, :write] -> :atomvm.posix_open(complete_path, [:o_rdwr, :o_creat], 0o644)
+          [:write, :read] -> :atomvm.posix_open(complete_path, [:o_rdwr, :o_creat], 0o644)
+        end
       end
 
     case open_result do
