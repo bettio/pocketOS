@@ -100,13 +100,7 @@ defmodule HAL do
 
     {:ok, pm} = :bq25896_driver.start_link()
     :bq25896_driver.open(pm)
-
-    spawn(fn ->
-      IO.puts("Shutdown task started")
-      :timer.sleep(10000)
-      IO.puts("Shutting down")
-      :bq25896_driver.shutdown(pm)
-    end)
+    :erlang.register(:pm, pm)
 
     {:ok, expio} = :xl9555_driver.start_link()
     :xl9555_driver.open(expio)
