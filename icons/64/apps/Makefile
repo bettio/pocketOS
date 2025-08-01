@@ -10,6 +10,7 @@ all: \
     $(DEST_PATH)/map.rgba \
     $(DEST_PATH)/mail.rgba \
     $(DEST_PATH)/mail_none.rgba \
+    $(DEST_PATH)/shut_down.rgba \
     $(DEST_PATH)/terminal.rgba
 
 directories: $(DEST_PATH)
