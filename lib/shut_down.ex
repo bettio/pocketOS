@@ -1,12 +1,12 @@
+alias PhotonUI.Widgets.Button
 alias PhotonUI.Widgets.Container
-alias PhotonUI.Widgets.IconGridView
 alias PhotonUI.Widgets.VerticalLayout
 alias PhotonUI.Widgets.Rectangle
 alias PhotonUI.Widgets.Text
 alias PhotonUI.UIServer
 
-defmodule UI.Menu do
-  def get_ui do
+defmodule UI.ShutDown do
+  def get_ui(_display_server) do
     avail_mem =
       try do
         "#{div(:erlang.system_info(:esp32_free_heap_size), 1024)} K"
@@ -43,8 +43,8 @@ defmodule UI.Menu do
                 x: 8,
                 y: 0,
                 height: 16,
-                width: byte_size(" Menu ") * 8,
-                text: " Menu ",
+                width: byte_size(" Shut Down ") * 8,
+                text: " Shut Down ",
                 bgcolor: 0x4792EC
               },
               %Text{
@@ -59,61 +59,26 @@ defmodule UI.Menu do
               }
             ]
           },
-          %IconGridView{
-            name: :grid,
+          %Button{
+            name: :power_off,
             x: 0,
             y: 0,
-            height: 235,
-            width: 320,
-            icon_size: 64,
-            cell_width: 80,
-            cell_height: 100
+            height: 32,
+            width: 240,
+            text: "Power Off"
+          },
+          %Button{
+            name: :cancel,
+            x: 0,
+            y: 48,
+            height: 32,
+            width: 240,
+            text: "Cancel"
           }
         ]
       }
     ]
   end
-
-  @menu_model [
-    %{
-      source: {:pocket_os, "icons/apps/terminal.rgba"},
-      text: "ALisp",
-      app: UI.Terminal,
-      args: [mf: {:arepl, :start}]
-    },
-    # TODO: add WASM entries
-    # WASM example:
-    #    %{
-    #      source: {:pocket_os, "icons/apps/terminal.rgba"},
-    #      text: "WASM",
-    #      app: UI.Terminal,
-    #      args: [mfa: {WASMLauncher, :start, ["wasi_hello_world.wasm"]}]
-    #    },
-    %{
-      source: {:pocket_os, "icons/apps/terminal.rgba"},
-      text: "Lora Mon",
-      app: UI.Terminal,
-      args: [mf: {CLIApps.LoraMonitor, :start}]
-    },
-    %{
-      source: {:pocket_os, "icons/apps/mail.rgba"},
-      text: "MeshMsgs",
-      app: UI.MeshMessages,
-      args: []
-    },
-    %{
-      source: {:pocket_os, "icons/apps/map.rgba"},
-      text: "Map",
-      app: UI.Map,
-      args: []
-    },
-    %{
-      source: {:pocket_os, "icons/apps/shut_down.rgba"},
-      text: "Shut Down",
-      app: UI.ShutDown,
-      args: []
-    }
-  ]
 
   def start_link(args, opts) do
     UIServer.start_link(__MODULE__, args, opts)
@@ -123,8 +88,10 @@ defmodule UI.Menu do
     UIServer.start_monitor(__MODULE__, args, opts)
   end
 
-  def init(_opts) do
-    {:ok, {get_ui(), %{}}, nil}
+  def init(opts) do
+    display_server = opts[:display_server]
+
+    {:ok, {get_ui(display_server), %{}}, %{display_server: display_server, has_pos: false}}
   end
 
   def handle_call(_msg, _from, state) do
@@ -135,24 +102,24 @@ defmodule UI.Menu do
     {:noreply, state}
   end
 
-  def handle_info(msg, state) do
+  def handle_info(msg, _ui, state) do
     :erlang.display({:handle_info, msg})
     {:noreply, state}
   end
 
-  def handle_event(:ui, :shown, ui, state) do
-    updated_ui =
-      UIServer.begin_widget_state_update(ui)
-      |> UIServer.update_property!(:grid, :model, @menu_model)
-      |> UIServer.apply_widget_state_update(ui)
+  def handle_event(:power_off, :clicked, _ui, state) do
+    with pm when pm != :undefined <- :erlang.whereis(:pm) do
+      IO.puts("Shutdown started")
+      :bq25896_driver.shutdown(pm)
+    else
+      _error ->
+        IO.puts("No power management available")
+    end
 
-    {:noreply, updated_ui, state}
+    {:noreply, state}
   end
 
-  def handle_event(:grid, {:clicked, _index, %{app: app, args: args} = _item}, _ui, state) do
-    Process.whereis(:ui_server)
-    |> send({:show, app, args})
-
+  def handle_event(:cancel, :clicked, _ui, state) do
     {:stop, :normal, state}
   end
 
