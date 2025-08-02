@@ -13,13 +13,14 @@
     handle_info/2
 ]).
 
--record(state, {listener, i2c}).
+-record(state, {listener, i2c, modifier = none}).
 
 -define(GPIO_NUM, 6).
 -define(ADDRESS, 16#34).
 
 -define(REG_CFG, 16#01).
 -define(REG_INT_STAT, 16#02).
+-define(REG_LCK_EC, 16#03).
 -define(REG_KEY_EVENT_A, 16#04).
 -define(REG_GPI_EM_1, 16#20).
 -define(REG_GPI_EM_2, 16#21).
@@ -40,12 +41,53 @@
 -define(REG_CFG_GPI_IEN, 16#02).
 -define(REG_CFG_KE_IEN, 16#01).
 
--define(KEYMAP, {
-    {$q, $w, $e, $r, $t, $y, $u, $i, $o, $p},
-    {$a, $s, $d, $f, $g, $h, $j, $k, $l, $\n},
-    {0, $z, $x, $c, $v, $b, $n, $m, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
-}).
+-define(KEYMAP,
+    {
+        {$q, $w, $e, $r, $t, $y, $u, $i, $o, $p},
+        {$a, $s, $d, $f, $g, $h, $j, $k, $l, $\n},
+        {{switch, symbol}, $z, $x, $c, $v, $b, $n, $m, {switch, shift}, $\b},
+        {$\s, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    }
+).
+
+-define(SHIFTMAP,
+    {
+        {$Q, $W, $E, $R, $T, $Y, $U, $I, $O, $P},
+        {$A, $S, $D, $F, $G, $H, $J, $K, $L, $\n},
+        {0, $Z, $X, $C, $V, $B, $N, $M, 0, $\b},
+        {$\s, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    }
+).
+
+-define(CAPSMAP,
+    {
+        {$Q, $W, $E, $R, $T, $Y, $U, $I, $O, $P},
+        {$A, $S, $D, $F, $G, $H, $J, $K, $L, $\n},
+        {{switch, none}, $Z, $X, $C, $V, $B, $N, $M, {switch, none}, $\b},
+        {$\s, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    }
+).
+
+-define(SYMMAP,
+    {
+        {$1, $2, $3, $4, $5, $6, $7, $8, $9, $0},
+        {$*, $/, $+, $-, $=, $:, $', $", $@, $\n},
+        {{switch, shift_symbol}, $_, $$, $;, $?, $!, $,, $., {switch, capslock}, $\b},
+        {$\s, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    }
+).
+
+-define(SHIFTSYMMAP,
+    {
+        {$<, $>, $[, $], $(, $), ${, $}, $|, 0},
+        {$&, $%, $^, $#, $\\, $~, 0, 0, 0, 0},
+        {{switch, symbol}, 0, 0, 0, 0, 0, 0, 0, {switch, none}, $\b},
+        {$\s, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    }
+).
+
+-define(ROW_COUNT, 4).
+-define(COL_COUNT, 10).
 
 start_link() ->
     gen_server:start_link(?MODULE, [], []).
@@ -84,32 +126,95 @@ handle_call(_msg, _from, state) ->
 handle_cast(_Msg, State) ->
     {reply, error, State}.
 
-handle_info({gpio_interrupt, ?GPIO_NUM}, #state{listener = Listener, i2c = I2C} = State) ->
-    case read_register(I2C, ?REG_KEY_EVENT_A) of
-        {ok, Num} ->
-            write_register(I2C, ?REG_INT_STAT, 1),
-            Evt = keyevent_to_event(Num),
-            Listener ! {input_event, self(), erlang:system_time(millisecond), Evt};
-        NotOk ->
-            erlang:display({not_ok, NotOk})
-    end,
-    {noreply, State};
+handle_info(
+    {gpio_interrupt, ?GPIO_NUM}, #state{listener = Listener, i2c = I2C, modifier = Modifier} = State
+) ->
+    NewModifier =
+        case read_register(I2C, ?REG_INT_STAT) of
+            % K_INT
+            {ok, 0} -> read_and_send_events(I2C, Listener, Modifier);
+            % GPI_INT
+            {ok, 1} -> read_and_send_events(I2C, Listener, Modifier)
+        end,
+    {noreply, State#state{modifier = NewModifier}};
 handle_info(Msg, State) ->
     erlang:display({got, Msg}),
     {noreply, State}.
 
-keyevent_to_event(KeyEvent) ->
+read_and_send_events(I2C, Listener, Modifier) ->
+    case read_register(I2C, ?REG_KEY_EVENT_A) of
+        {ok, 0} ->
+            clear_interrupt(I2C),
+            Modifier;
+        {ok, Num} ->
+            NewModifier =
+                case keyevent_to_event(Num, Modifier) of
+                    {{keyboard, _UpDown, _Char} = Evt, ReturnedModifier} ->
+                        erlang:display(
+                            {going_to_send, Listener,
+                                {input_event, self(), erlang:system_time(millisecond), Evt}}
+                        ),
+                        Listener ! {input_event, self(), erlang:system_time(millisecond), Evt},
+                        ReturnedModifier;
+                    {{ignored, modifier}, ReturnedModifier} ->
+                        ReturnedModifier;
+                    {{ignored, Code}, ReturnedModifier} ->
+                        erlang:display({tca8418, ignored, Code}),
+                        ReturnedModifier
+                end,
+            {ok, LkcEcValue} = read_register(I2C, ?REG_LCK_EC),
+            PendingCount = LkcEcValue band 16#F,
+            case PendingCount of
+                0 -> clear_interrupt(I2C);
+                _N -> read_and_send_events(I2C, Listener, NewModifier)
+            end,
+            NewModifier
+    end.
+
+clear_interrupt(I2C) ->
+    write_register(I2C, ?REG_INT_STAT, 1).
+
+keyevent_to_event(KeyEvent, Modifier) ->
     UpDown =
         case (KeyEvent band 16#80) of
-            0 -> down;
-            16#80 -> up
+            0 -> up;
+            16#80 -> down
         end,
     MaskedCode = (KeyEvent band 16#7F) - 1,
     Row = MaskedCode div 10,
     Column = MaskedCode rem 10,
-    RowTuple = element(Row + 1, ?KEYMAP),
-    Char = element(Column + 1, RowTuple),
-    {keyboard, UpDown, Char}.
+    if
+        Row >= ?ROW_COUNT -> {{ignored, KeyEvent}, Modifier};
+        Column >= ?COL_COUNT -> {{ignored, KeyEvent}, Modifier};
+        true -> row_col_to_char(Row, Column, UpDown, Modifier)
+    end.
+
+row_col_to_char(Row, Column, UpDown, Modifier) ->
+    RowTuple = element(Row + 1, modifier_to_layer(Modifier)),
+    case element(Column + 1, RowTuple) of
+        0 ->
+            {{ignored, {Row, Column, UpDown}}, next_modifier(Modifier)};
+        {switch, NewModifier} when UpDown == up ->
+            {{ignored, NewModifier}, NewModifier};
+        Char ->
+            {{keyboard, UpDown, Char}, next_modifier(Modifier)}
+    end.
+
+modifier_to_layer(Modifier) ->
+    case Modifier of
+        none -> ?KEYMAP;
+        shift -> ?SHIFTMAP;
+        capslock -> ?CAPSMAP;
+        symbol -> ?SYMMAP;
+        shift_symbol -> ?SHIFTSYMMAP
+    end.
+
+next_modifier(Modifier) ->
+    case Modifier of
+        shift -> none;
+        shift_symbol -> none;
+        Other -> Other
+    end.
 
 init_default(I2C) ->
     write_register(I2C, ?REG_GPIO_DIR_1, 16#00),
