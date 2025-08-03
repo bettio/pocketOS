@@ -2,7 +2,7 @@
 
 ## 🎯 What is pocketOS?
 
-**pocketOS** is not your typical operating system—it's an Elixir application that transforms ESP32-based handheld devices into powerful, hackable cyberdecks. Built on [AtomVM](https://github.com/atomvm/AtomVM), it brings the power of the BEAM to resource-constrained devices, enabling you to run functional, concurrent code on hardware that fits in your pocket.
+**pocketOS** is not your typical operating system—it's an Elixir application that transforms ESP32-based handheld devices into powerful, hackable cyberdecks. Running on AtomVM — which brings the BEAM to resource-constrained devices — pocketOS delivers a complete handheld experience with functional, concurrent code on hardware that fits in your pocket.
 
 ## ✨ Features
 
