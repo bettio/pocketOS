@@ -1,0 +1,35 @@
+name: Test
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        otp: ['27.0']
+        elixir: ['1.15']
+    steps:
+      - uses: actions/checkout@v2
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{matrix.otp}}
+          elixir-version: ${{matrix.elixir}}
+
+      - name: Install dependencies
+        run: mix do deps.get, deps.compile
+
+      - name: Check retired deps
+        run: mix hex.audit
+
+      # TODO: mix compile --warnings-as-errors
+      - name: Compile
+        run: mix compile
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: AtomVM PackBEAM
+        run: mix atomvm.packbeam
+
+      - name: Test
+        run: mix test
