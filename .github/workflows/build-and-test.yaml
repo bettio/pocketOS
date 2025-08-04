@@ -10,10 +10,17 @@ jobs:
         elixir: ['1.15']
     steps:
       - uses: actions/checkout@v2
+
       - uses: erlef/setup-beam@v1
         with:
           otp-version: ${{matrix.otp}}
           elixir-version: ${{matrix.elixir}}
+
+      - name: "APT update"
+        run: sudo apt update -y
+
+      - name: "Install deps"
+        run: sudo apt install -y libwxgtk3.2-dev
 
       - name: Install dependencies
         run: mix do deps.get, deps.compile
