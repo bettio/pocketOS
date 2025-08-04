@@ -34,16 +34,52 @@ git clone https://github.com/yourusername/pocketOS.git
 cd pocketOS
 ```
 
-### 2. Build the Application
+### 2. Configure Platform
+Edit `lib/hal.ex` and uncomment your target platform:
+```elixir
+# Uncomment the platform you're using:
+@platform "t-deck"
+# @platform "t-pager"
+# @platform "linux"
+```
+
+### 3. Build the Application
 ```bash
 mix deps.get
 mix compile
 ```
 
-### 3. Package for AtomVM
+### 4. Package for AtomVM
 ```bash
 mix atomvm.packbeam
 ```
+
+### 5. Flash to Device
+```bash
+# For T-Deck or T-LoRa-Pager (remember: port might be different on your system)
+mix atomvm.esp32.flash --port /dev/ttyACM0
+```
+
+### 6. (Optional) Configure SD Card
+Insert a FAT-formatted SD card with optional configuration files:
+
+**WiFi Configuration** - `wifi.sxp`:
+```lisp
+(
+(ssid "myssid")
+(psk "mypass")
+)
+```
+
+**Custom Init Script** - `init.lsp`:
+```lisp
+(progn
+    [...]
+    (quote ok)
+)
+```
+
+> **Note**: Follow ESP-IDF limitations for filesystem and SD card compatibility.
 
 ## 🤝 Contributing
 
