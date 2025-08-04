@@ -20,7 +20,14 @@ jobs:
         run: sudo apt update -y
 
       - name: "Install deps"
-        run: sudo apt install -y libwxgtk3.2-dev
+        run: sudo apt install -y libwxgtk3.2-dev xvfb
+
+      # Required from wxImage, for PNG loading using escript
+      - name: Start Xvfb
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+          sleep 15  # Give xvfb time to start
 
       - name: Install dependencies
         run: mix do deps.get, deps.compile
@@ -30,6 +37,8 @@ jobs:
 
       # TODO: mix compile --warnings-as-errors
       - name: Compile
+        env:
+          DISPLAY: :99
         run: mix compile
 
       - name: Check formatting
