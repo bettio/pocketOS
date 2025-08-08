@@ -105,7 +105,7 @@ handle_call(
 
     RadioPayload = meshtastic:serialize(Encrypted),
     RadioModule:broadcast(Radio, RadioPayload),
-    {reply, ok, State#state{last_packet_id = LastPacketId}};
+    {reply, ok, State#state{last_packet_id = PacketId}};
 handle_call(_msg, _from, State) ->
     {reply, error, State}.
 
