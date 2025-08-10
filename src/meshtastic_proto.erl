@@ -63,5 +63,5 @@ encode(Map) ->
         #{portnum := 'POSITION_APP', payload := PayloadMap} ->
             Payload = uprotobuf_encoder:encode(PayloadMap, ?POSITION_SCHEMA),
             NewMap = Map#{payload := Payload},
-            uprotobuf_encoder:encode(Map, ?MAIN_SCHEMA)
+            uprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA)
     end.
