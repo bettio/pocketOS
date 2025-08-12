@@ -405,4 +405,18 @@ defmodule HAL do
     # PPS = 13
     {:ok, %{device: "UART1", options: [tx_pin: 12, rx_pin: 4, speed: 38400]}}
   end
+
+  def unique_id_256(namespace) do
+    unique_id_256(@platform, namespace)
+  end
+
+  defp unique_id_256(device, namespace)
+       when device in ["t-deck", "t-pager", "esp32-devkit", {"m5stack", "faces"}] do
+    {:ok, mac_address} = :esp.get_default_mac()
+    :crypto.hash(:sha256, <<namespace::binary, mac_address::binary>>)
+  end
+
+  defp unique_id_256("linux", _namespace) do
+    raise "No unique_id_256"
+  end
 end
