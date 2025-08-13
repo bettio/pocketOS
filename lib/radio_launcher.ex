@@ -20,9 +20,16 @@ defmodule RadioLauncher do
     {:ok, periph_config} = HAL.get_peripheral_config("radio")
     complete_config = Map.merge(meshtastic_medium_fast_config, periph_config)
 
+    <<node_id::little-unsigned-integer-32, _discard::binary>> = HAL.unique_id_256("meshtastic")
+    IO.puts("Node Id is: #{node_id}")
+
+    initial_packet_id = :erlang.system_time(:second)
+    IO.puts("Initial packet id is: #{initial_packet_id}")
+
     {:ok, _rm} =
       :radio_manager.start_link(complete_config, [
-        {{:local, :meshtastic_server}, :meshtastic_server, [callbacks: MeshtasticCallbacks]}
+        {{:local, :meshtastic_server}, :meshtastic_server,
+         [callbacks: MeshtasticCallbacks, node_id: node_id, initial_packet_id: initial_packet_id]}
       ])
   end
 end

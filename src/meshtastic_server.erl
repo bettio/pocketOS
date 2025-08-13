@@ -16,7 +16,7 @@
     handle_info/2
 ]).
 
--record(state, {radio, callbacks, last_packet_id = 1, node_id = 1127302788, last_seen = #{}}).
+-record(state, {radio, callbacks, last_packet_id, node_id, last_seen = #{}}).
 
 -define(PACKET_SEEN_EXPIRY_SEC, 30).
 
@@ -34,7 +34,11 @@ send(Server, DestAddr, Data) ->
 
 init([Radio, MeshtasticOpts]) ->
     Callbacks = proplists:get_value(callbacks, MeshtasticOpts),
-    {ok, #state{radio = Radio, callbacks = Callbacks}}.
+    NodeId = proplists:get_value(node_id, MeshtasticOpts, 1127302788),
+    InitialPacketId = proplists:get_value(initial_packet_id, MeshtasticOpts, 1),
+    {ok, #state{
+        radio = Radio, callbacks = Callbacks, node_id = NodeId, last_packet_id = InitialPacketId
+    }}.
 
 handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, State) ->
     case meshtastic:parse(Payload) of
