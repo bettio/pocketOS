@@ -21,8 +21,26 @@
     short_name => {3, string},
     macaddr => {4, bytes},
     hw_model => {5, int32},
-    is_licensed => {6, bool}
+    is_licensed => {6, bool},
+    role => {7, ?ROLE},
+    public_key => {8, bytes}
 }).
+-define(ROLE,
+    {enum, #{
+        'CLIENT' => 0,
+        'CLIENT_MUTE' => 1,
+        'ROUTER' => 2,
+        'ROUTER_CLIENT' => 3,
+        'REPEATER' => 4,
+        'TRACKER' => 5,
+        'SENSOR' => 6,
+        'TAK' => 7,
+        'CLIENT_HIDDEN' => 8,
+        'LOST_AND_FOUND' => 9,
+        'TAK_TRACKER' => 10,
+        'ROUTER_LATE' => 11
+    }}
+).
 -define(TELEMETRY_SCHEMA, #{
     time => {1, fixed32},
     device_metrics => {2, bytes}
@@ -62,6 +80,10 @@ encode(Map) ->
             uprotobuf_encoder:encode(Map, ?MAIN_SCHEMA);
         #{portnum := 'POSITION_APP', payload := PayloadMap} ->
             Payload = uprotobuf_encoder:encode(PayloadMap, ?POSITION_SCHEMA),
+            NewMap = Map#{payload := Payload},
+            uprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA);
+        #{portnum := 'NODEINFO_APP', payload := PayloadMap} ->
+            Payload = uprotobuf_encoder:encode(PayloadMap, ?USER_SCHEMA),
             NewMap = Map#{payload := Payload},
             uprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA)
     end.

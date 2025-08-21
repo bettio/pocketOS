@@ -16,7 +16,7 @@
     handle_info/2
 ]).
 
--record(state, {radio, callbacks, last_packet_id, node_id, last_seen = #{}}).
+-record(state, {radio, callbacks, last_packet_id, node_id, last_seen = #{}, node_info = #{}}).
 
 -define(PACKET_SEEN_EXPIRY_SEC, 30).
 
@@ -36,8 +36,16 @@ init([Radio, MeshtasticOpts]) ->
     Callbacks = proplists:get_value(callbacks, MeshtasticOpts),
     NodeId = proplists:get_value(node_id, MeshtasticOpts, 1127302788),
     InitialPacketId = proplists:get_value(initial_packet_id, MeshtasticOpts, 1),
+    NodeInfo = proplists:get_value(node_info, MeshtasticOpts),
+
+    erlang:send_after(500, self(), periodic),
+
     {ok, #state{
-        radio = Radio, callbacks = Callbacks, node_id = NodeId, last_packet_id = InitialPacketId
+        radio = Radio,
+        callbacks = Callbacks,
+        node_id = NodeId,
+        last_packet_id = InitialPacketId,
+        node_info = NodeInfo
     }}.
 
 handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, State) ->
@@ -120,6 +128,9 @@ handle_call(_msg, _from, State) ->
 handle_cast(_msg, State) ->
     {reply, error, State}.
 
+handle_info(periodic, State) ->
+    NewState = do_periodic_broadcast(State),
+    {noreply, NewState};
 handle_info(_msg, State) ->
     {noreply, State}.
 
@@ -181,3 +192,26 @@ prune_expired_last_seen(LastSeenMap, MonotonicSec) ->
             LastSeenMap
         ),
     maps:filter(fun(_Source, SeenPacketMap) -> SeenPacketMap =/= #{} end, PrunedMap).
+
+%%
+%% Handle protobuf payloads
+%%
+
+do_periodic_broadcast(#state{node_info = #{user_info := UserInfo}} = State) ->
+    Data = #{
+        portnum => 'NODEINFO_APP',
+        payload => UserInfo
+    },
+    io:format("Broadcasting user info: ~p.~n", [UserInfo]),
+
+    Encoded = meshtastic_proto:encode(Data),
+    Bin = erlang:iolist_to_binary(Encoded),
+
+    {reply, ok, NewState} = handle_call({send, 16#FFFFFFFF, Bin}, undefined, State),
+
+    erlang:send_after(60000, self(), periodic),
+
+    NewState;
+do_periodic_broadcast(State) ->
+    io:format("Missing user_info, skipping periodic broadcast.~n"),
+    State.

@@ -3,6 +3,7 @@ defmodule MeshtasticCallbacks do
     :micronesia.start()
     :micronesia.create_table(:meshtastic_message)
     :micronesia.create_table(:meshtastic_position)
+    :micronesia.create_table(:meshtastic_node_info)
   end
 
   def message_cb(%{message: %{portnum: :TEXT_MESSAGE_APP, payload: payload}, packet_id: packet_id}) do
@@ -28,6 +29,20 @@ defmodule MeshtasticCallbacks do
     :micronesia.dirty_write(
       {:meshtastic_position, src, %{lat: lat * 0.0000001, lon: lon * 0.0000001, alt: alt}}
     )
+  end
+
+  def message_cb(%{
+        message: %{
+          portnum: :NODEINFO_APP,
+          payload: payload
+        },
+        src: src
+      }) do
+    payload_with_updated = Map.put(payload, :updated_at, :erlang.system_time(:second))
+
+    IO.puts("Got node info message: #{inspect(payload)}")
+
+    :micronesia.dirty_write({:meshtastic_node_info, src, payload_with_updated})
   end
 
   def message_cb(msg) do
