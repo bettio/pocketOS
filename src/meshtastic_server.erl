@@ -41,7 +41,11 @@ init([Radio, MeshtasticOpts]) ->
     }}.
 
 handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, State) ->
+    ThisNodeAddress = State#state.node_id,
     case meshtastic:parse(Payload) of
+        {ok, #{src := ThisNodeAddress} = Packet} ->
+            io:format("Discarding packet from this node: ~p.~n", [Packet]),
+            {reply, discard, State};
         {ok, #{hop_limit := _HopLimit, src := Src, packet_id := PacketId} = Packet} ->
             MonotonicTS = erlang:monotonic_time(second),
             {Duplicated, UpdatedLastSeen} = update_last_seen(
