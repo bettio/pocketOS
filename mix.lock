@@ -3,5 +3,5 @@
   "elixir_make": {:hex, :elixir_make, "0.8.4", "4960a03ce79081dee8fe119d80ad372c4e7badb84c493cc75983f9d3bc8bde0f", [:mix], [{:castore, "~> 0.1 or ~> 1.0", [hex: :castore, repo: "hexpm", optional: true]}, {:certifi, "~> 2.0", [hex: :certifi, repo: "hexpm", optional: true]}], "hexpm", "6e7f1d619b5f61dfabd0a20aa268e575572b542ac31723293a4c1a567d5ef040"},
   "exatomvm": {:git, "https://github.com/AtomVM/exatomvm.git", "cbd2fb6cb3b0c614c1973919a4f43c00f4495c33", []},
   "uf2tool": {:hex, :uf2tool, "1.1.0", "7091931234ca5a256b66ea691983867d51229798622d083f85c1ad779798a734", [:rebar3], [], "hexpm", "1a7e5ca7ef3d19c7a0b0acf3db804b3188e0980884acffa13fd57d733507b73d"},
-  "uprotobuf": {:git, "https://github.com/bettio/uprotobuf/", "ea8469d942575598981e7100ef1dd5da4dc0cfdf", []},
+  "uprotobuf": {:git, "https://github.com/bettio/uprotobuf/", "999fe8840d72e0f9e0a8f537a50a0968eb7a9f19", []},
 }
