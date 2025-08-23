@@ -2,7 +2,15 @@
 -export([decode/1, encode/1]).
 
 -define(MAIN_SCHEMA, #{
-    portnum => {1, ?PORTNUM_ENUM}, payload => {2, bytes}, want_response => {3, bool}
+    portnum => {1, ?PORTNUM_ENUM},
+    payload => {2, bytes},
+    want_response => {3, bool},
+    dest => {4, fixed32},
+    source => {5, fixed32},
+    request_id => {6, fixed32},
+    reply_id => {7, fixed32},
+    emoji => {8, fixed32},
+    bitfield => {9, int32}
 }).
 -define(PORTNUM_ENUM,
     {enum, #{
