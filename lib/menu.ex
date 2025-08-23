@@ -102,6 +102,12 @@ defmodule UI.Menu do
       args: []
     },
     %{
+      source: {:pocket_os, "icons/apps/radio.rgba"},
+      text: "MeshNodes",
+      app: UI.MeshNodes,
+      args: []
+    },
+    %{
       source: {:pocket_os, "icons/apps/map.rgba"},
       text: "Map",
       app: UI.Map,
