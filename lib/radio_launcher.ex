@@ -35,7 +35,7 @@ defmodule RadioLauncher do
           macaddr: macaddr,
           hw_model: 50,
           role: :CLIENT,
-          long_name: "pockedOS #{short_node_id}",
+          long_name: "pocketOS #{short_node_id}",
           short_name: short_node_id,
           is_licensed: false
         }
