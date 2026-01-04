@@ -16,8 +16,9 @@ defmodule CLIApps.LoraMonitor do
       }
 
     {:ok, periph_config} = HAL.get_peripheral_config("radio")
+    %{radio_module: radio_module} = periph_config
     lora_config = Map.merge(lora_config, periph_config)
-    {:ok, _lora} = :lora_sx126x.start(lora_config)
+    {:ok, _lora} = radio_module.start(lora_config)
 
     recv_loop()
   end
