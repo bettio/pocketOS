@@ -29,7 +29,7 @@ defmodule PocketOS.MixProject do
       {:exatomvm, github: "AtomVM/exatomvm", runtime: false},
       {:elixir_make, "~> 0.4", runtime: false},
       {:avm_scene, github: "AtomVM/avm_scene"},
-      {:uprotobuf, git: "https://github.com/bettio/uprotobuf/"}
+      {:aprotobuf, git: "https://github.com/atomvm/aprotobuf/"}
     ]
   end
 end

@@ -1,7 +1,7 @@
 %{
+  "aprotobuf": {:git, "https://github.com/atomvm/aprotobuf/", "701c39966b2647fe26e6ed73590f5f9e2dc481ae", []},
   "avm_scene": {:git, "https://github.com/AtomVM/avm_scene.git", "c43ce8f8da4058669ac0cf819b8763023f4f6450", []},
   "elixir_make": {:hex, :elixir_make, "0.9.0", "6484b3cd8c0cee58f09f05ecaf1a140a8c97670671a6a0e7ab4dc326c3109726", [:mix], [], "hexpm", "db23d4fd8b757462ad02f8aa73431a426fe6671c80b200d9710caf3d1dd0ffdb"},
-  "exatomvm": {:git, "https://github.com/AtomVM/exatomvm.git", "656255a605b1effaf08598729bca1038cb3f62b1", []},
+  "exatomvm": {:git, "https://github.com/AtomVM/exatomvm.git", "4e615cd46d1568337a2a21c56ea79776fef85612", []},
   "uf2tool": {:hex, :uf2tool, "1.1.0", "7091931234ca5a256b66ea691983867d51229798622d083f85c1ad779798a734", [:rebar3], [], "hexpm", "1a7e5ca7ef3d19c7a0b0acf3db804b3188e0980884acffa13fd57d733507b73d"},
-  "uprotobuf": {:git, "https://github.com/bettio/uprotobuf/", "999fe8840d72e0f9e0a8f537a50a0968eb7a9f19", []},
 }

@@ -53,22 +53,22 @@
 %}).
 
 decode(Data) ->
-    MainSchema = uprotobuf_decoder:transform_schema(?MAIN_SCHEMA),
-    ParsedMain = uprotobuf_decoder:parse(Data, MainSchema),
+    MainSchema = aprotobuf_decoder:transform_schema(?MAIN_SCHEMA),
+    ParsedMain = aprotobuf_decoder:parse(Data, MainSchema),
     case ParsedMain of
         #{portnum := 'TEXT_MESSAGE_APP'} ->
             ParsedMain;
         #{portnum := 'POSITION_APP', payload := Payload} ->
-            PositionSchema = uprotobuf_decoder:transform_schema(?POSITION_SCHEMA),
-            NewPayload = uprotobuf_decoder:parse(Payload, PositionSchema),
+            PositionSchema = aprotobuf_decoder:transform_schema(?POSITION_SCHEMA),
+            NewPayload = aprotobuf_decoder:parse(Payload, PositionSchema),
             ParsedMain#{payload := NewPayload};
         #{portnum := 'NODEINFO_APP', payload := Payload} ->
-            UserSchema = uprotobuf_decoder:transform_schema(?USER_SCHEMA),
-            NewPayload = uprotobuf_decoder:parse(Payload, UserSchema),
+            UserSchema = aprotobuf_decoder:transform_schema(?USER_SCHEMA),
+            NewPayload = aprotobuf_decoder:parse(Payload, UserSchema),
             ParsedMain#{payload := NewPayload};
         #{portnum := 'TELEMETRY_APP', payload := Payload} ->
-            TelemetrySchema = uprotobuf_decoder:transform_schema(?TELEMETRY_SCHEMA),
-            NewPayload = uprotobuf_decoder:parse(Payload, TelemetrySchema),
+            TelemetrySchema = aprotobuf_decoder:transform_schema(?TELEMETRY_SCHEMA),
+            NewPayload = aprotobuf_decoder:parse(Payload, TelemetrySchema),
             ParsedMain#{payload := NewPayload};
         Any ->
             Any
@@ -77,13 +77,13 @@ decode(Data) ->
 encode(Map) ->
     case Map of
         #{portnum := 'TEXT_MESSAGE_APP'} ->
-            uprotobuf_encoder:encode(Map, ?MAIN_SCHEMA);
+            aprotobuf_encoder:encode(Map, ?MAIN_SCHEMA);
         #{portnum := 'POSITION_APP', payload := PayloadMap} ->
-            Payload = uprotobuf_encoder:encode(PayloadMap, ?POSITION_SCHEMA),
+            Payload = aprotobuf_encoder:encode(PayloadMap, ?POSITION_SCHEMA),
             NewMap = Map#{payload := Payload},
-            uprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA);
+            aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA);
         #{portnum := 'NODEINFO_APP', payload := PayloadMap} ->
-            Payload = uprotobuf_encoder:encode(PayloadMap, ?USER_SCHEMA),
+            Payload = aprotobuf_encoder:encode(PayloadMap, ?USER_SCHEMA),
             NewMap = Map#{payload := Payload},
-            uprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA)
+            aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA)
     end.
