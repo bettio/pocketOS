@@ -1,5 +1,15 @@
 -module(meshtastic).
--export([parse/1, serialize/1, decrypt/1, decrypt/2, encrypt/1, encrypt/2]).
+-export([
+    parse/1,
+    serialize/1,
+    decrypt/1,
+    decrypt/2,
+    encrypt/1,
+    encrypt/2,
+    channel_hash/2,
+    default_long_fast_psk/0,
+    default_long_fast_channel/0
+]).
 
 parse(Payload) ->
     case Payload of
@@ -45,16 +55,30 @@ bool_to_int(false) -> 0;
 bool_to_int(true) -> 1.
 
 decrypt(Packet) ->
-    DefaultKey =
-        <<16#d4, 16#f1, 16#bb, 16#3a, 16#20, 16#29, 16#07, 16#59, 16#f0, 16#bc, 16#ff, 16#ab, 16#cf,
-            16#4e, 16#69, 16#01>>,
-    decrypt(Packet, DefaultKey).
+    decrypt(Packet, default_long_fast_psk()).
 
 encrypt(Packet) ->
-    DefaultKey =
-        <<16#d4, 16#f1, 16#bb, 16#3a, 16#20, 16#29, 16#07, 16#59, 16#f0, 16#bc, 16#ff, 16#ab, 16#cf,
-            16#4e, 16#69, 16#01>>,
-    encrypt(Packet, DefaultKey).
+    encrypt(Packet, default_long_fast_psk()).
+
+default_long_fast_psk() ->
+    <<16#d4, 16#f1, 16#bb, 16#3a, 16#20, 16#29, 16#07, 16#59, 16#f0, 16#bc, 16#ff, 16#ab, 16#cf,
+        16#4e, 16#69, 16#01>>.
+
+default_long_fast_channel() ->
+    Name = <<"LongFast">>,
+    Psk = default_long_fast_psk(),
+    #{name => Name, psk => Psk, hash => channel_hash(Name, Psk)}.
+
+channel_hash(Name, Psk) when is_binary(Name), is_binary(Psk) ->
+    xor_bytes(Name) bxor xor_bytes(Psk).
+
+xor_bytes(Bin) ->
+    xor_bytes(Bin, 0).
+
+xor_bytes(<<>>, Acc) ->
+    Acc;
+xor_bytes(<<B, Rest/binary>>, Acc) ->
+    xor_bytes(Rest, Acc bxor B).
 
 decrypt(Packet, Key) ->
     #{src := SrcAddr, packet_id := PktId, encrypted_data := EncData} = Packet,

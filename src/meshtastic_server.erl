@@ -16,7 +16,15 @@
     handle_info/2
 ]).
 
--record(state, {radio, callbacks, last_packet_id, node_id, last_seen = #{}, node_info = #{}}).
+-record(state, {
+    radio,
+    callbacks,
+    last_packet_id,
+    node_id,
+    last_seen = #{},
+    node_info = #{},
+    channel = #{}
+}).
 
 -define(PACKET_SEEN_EXPIRY_SEC, 30).
 
@@ -37,6 +45,7 @@ init([Radio, MeshtasticOpts]) ->
     NodeId = proplists:get_value(node_id, MeshtasticOpts, 1127302788),
     InitialPacketId = proplists:get_value(initial_packet_id, MeshtasticOpts, 1),
     NodeInfo = proplists:get_value(node_info, MeshtasticOpts),
+    Channel = init_channel(proplists:get_value(channel, MeshtasticOpts)),
 
     erlang:send_after(500, self(), periodic),
 
@@ -45,8 +54,14 @@ init([Radio, MeshtasticOpts]) ->
         callbacks = Callbacks,
         node_id = NodeId,
         last_packet_id = InitialPacketId,
-        node_info = NodeInfo
+        node_info = NodeInfo,
+        channel = Channel
     }}.
+
+init_channel(undefined) ->
+    meshtastic:default_long_fast_channel();
+init_channel(#{name := Name, psk := Psk} = Channel) ->
+    Channel#{hash => meshtastic:channel_hash(Name, Psk)}.
 
 handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, State) ->
     ThisNodeAddress = State#state.node_id,
@@ -63,7 +78,8 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
             IsRecipient = is_recipient(Packet, State),
             if
                 not Duplicated and IsRecipient ->
-                    case meshtastic:decrypt(Packet) of
+                    #{psk := Psk} = State#state.channel,
+                    case meshtastic:decrypt(Packet, Psk) of
                         #{data := Decrypted} = DecryptedPacket ->
                             try meshtastic_proto:decode(Decrypted) of
                                 Message ->
@@ -100,8 +116,12 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
 handle_call(
     {send, DestAddr, Data},
     _From,
-    #state{radio = {_RadioId, RadioModule, Radio}, node_id = NodeId, last_packet_id = LastPacketId} =
-        State
+    #state{
+        radio = {_RadioId, RadioModule, Radio},
+        node_id = NodeId,
+        last_packet_id = LastPacketId,
+        channel = #{psk := Psk, hash := ChannelHash}
+    } = State
 ) ->
     PacketId = LastPacketId + 1,
 
@@ -113,11 +133,11 @@ handle_call(
         via_mqtt => false,
         want_ack => false,
         hop_limit => 3,
-        channel_hash => 31,
+        channel_hash => ChannelHash,
         data => Data
     },
 
-    Encrypted = meshtastic:encrypt(Packet),
+    Encrypted = meshtastic:encrypt(Packet, Psk),
 
     RadioPayload = meshtastic:serialize(Encrypted),
     RadioModule:broadcast(Radio, RadioPayload),

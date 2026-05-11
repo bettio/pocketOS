@@ -28,6 +28,8 @@ defmodule RadioLauncher do
     <<macaddr::binary-6, _discard::binary>> = id_256
     IO.puts("Node Id is: #{node_id}")
 
+    meshtcfg = load_cfg_map("FS0:/meshtcfg.sxp")
+
     meshtastic_node_info =
       %{
         user_info: %{
@@ -40,12 +42,18 @@ defmodule RadioLauncher do
           is_licensed: false
         }
       }
-      |> Map.merge(load_cfg_map("FS0:/meshtcfg.sxp"))
+      |> Map.merge(meshtcfg)
 
     IO.puts("Node info is: #{inspect(meshtastic_node_info)}")
 
     initial_packet_id = :erlang.system_time(:second)
     IO.puts("Initial packet id is: #{initial_packet_id}")
+
+    channel =
+      case Map.get(meshtcfg, :channel_name) do
+        nil -> :meshtastic.default_long_fast_channel()
+        name -> %{name: name, psk: :meshtastic.default_long_fast_psk()}
+      end
 
     {:ok, _rm} =
       :radio_manager.start_link(complete_config, [
@@ -54,7 +62,8 @@ defmodule RadioLauncher do
            callbacks: MeshtasticCallbacks,
            node_id: node_id,
            initial_packet_id: initial_packet_id,
-           node_info: meshtastic_node_info
+           node_info: meshtastic_node_info,
+           channel: channel
          ]}
       ])
   end
