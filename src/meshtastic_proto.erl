@@ -10,7 +10,7 @@
     request_id => {6, fixed32},
     reply_id => {7, fixed32},
     emoji => {8, fixed32},
-    bitfield => {9, int32}
+    bitfield => {9, uint32}
 }).
 -define(PORTNUM_ENUM,
     {enum, #{
@@ -31,7 +31,8 @@
     hw_model => {5, int32},
     is_licensed => {6, bool},
     role => {7, ?ROLE},
-    public_key => {8, bytes}
+    public_key => {8, bytes},
+    is_unmessagable => {9, bool}
 }).
 -define(ROLE,
     {enum, #{
@@ -46,19 +47,20 @@
         'CLIENT_HIDDEN' => 8,
         'LOST_AND_FOUND' => 9,
         'TAK_TRACKER' => 10,
-        'ROUTER_LATE' => 11
+        'ROUTER_LATE' => 11,
+        'CLIENT_BASE' => 12
     }}
 ).
 -define(TELEMETRY_SCHEMA, #{
     time => {1, fixed32},
     device_metrics => {2, bytes}
 }).
-%-define(DEVICE_METRICS_SCHEMA, #{
-%    battery_level => {1, int32}, %uint32
-%    voltage => {2, float},
-%    channel_utilization => {3, float},
-%    air_util_tx => {4, float}
-%}).
+-define(DEVICE_METRICS_SCHEMA, #{
+    battery_level => {1, uint32},
+    voltage => {2, float},
+    channel_utilization => {3, float},
+    air_util_tx => {4, float}
+}).
 
 decode(Data) ->
     MainSchema = aprotobuf_decoder:transform_schema(?MAIN_SCHEMA),
@@ -76,7 +78,15 @@ decode(Data) ->
             ParsedMain#{payload := NewPayload};
         #{portnum := 'TELEMETRY_APP', payload := Payload} ->
             TelemetrySchema = aprotobuf_decoder:transform_schema(?TELEMETRY_SCHEMA),
-            NewPayload = aprotobuf_decoder:parse(Payload, TelemetrySchema),
+            Telemetry = aprotobuf_decoder:parse(Payload, TelemetrySchema),
+            NewPayload =
+                case Telemetry of
+                    #{device_metrics := DmBytes} ->
+                        DmSchema = aprotobuf_decoder:transform_schema(?DEVICE_METRICS_SCHEMA),
+                        Telemetry#{device_metrics := aprotobuf_decoder:parse(DmBytes, DmSchema)};
+                    _ ->
+                        Telemetry
+                end,
             ParsedMain#{payload := NewPayload};
         Any ->
             Any
