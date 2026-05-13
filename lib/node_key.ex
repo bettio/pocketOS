@@ -1,16 +1,25 @@
 defmodule NodeKey do
   def load_or_generate(path) do
     case load(path) do
-      {:ok, keypair} -> keypair
-      _ -> generate_and_persist(path)
+      {:ok, keypair} ->
+        IO.puts("[mesh] NodeKey: loaded existing keypair from #{path}")
+        keypair
+
+      error ->
+        IO.puts("[mesh] NodeKey: load #{path} failed (#{inspect(error)}), generating fresh")
+        generate_and_persist(path)
     end
   end
 
   defp load(path) do
     with {:ok, file} <- PocketOS.File.open(path, [:read]),
-         {:ok, <<pub::binary-32, priv::binary-32>>} <- PocketOS.File.read(file, 64),
-         :ok <- PocketOS.File.close(file) do
+         read_result <- PocketOS.File.read(file, 64),
+         :ok <- PocketOS.File.close(file),
+         {:ok, <<pub::binary-32, priv::binary-32>>} <- read_result do
       {:ok, {pub, priv}}
+    else
+      {:ok, short} when is_binary(short) -> {:error, {:short_read, byte_size(short)}}
+      other -> other
     end
   end
 
@@ -21,9 +30,15 @@ defmodule NodeKey do
   end
 
   defp persist(path, bin) do
-    with {:ok, file} <- PocketOS.File.open(path, [:write]),
-         {:ok, _} <- PocketOS.File.write(file, bin) do
-      PocketOS.File.close(file)
+    expected = byte_size(bin)
+
+    with {:ok, file} <- PocketOS.File.open(path, [:read, :write]),
+         {:ok, ^expected} <- PocketOS.File.write(file, bin),
+         :ok <- PocketOS.File.close(file) do
+      :ok
+    else
+      {:ok, n} when is_integer(n) -> {:error, {:short_write, n, expected}}
+      other -> other
     end
   end
 end

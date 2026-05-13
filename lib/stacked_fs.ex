@@ -26,12 +26,17 @@ defmodule StackedFS do
   def handle_call({:open, file_path, mode}, _from, state) do
     %{open_files: open_files, base_path: base_path} = state
 
-    complete_path = base_path <> file_path
+    complete_path =
+      case file_path do
+        "/" <> rest -> base_path <> rest
+        _ -> base_path <> file_path
+      end
 
     open_result =
       if @build_env == :test do
         :file.open(complete_path, [:binary | mode])
       else
+        # Add missing option for o_trunc
         case mode do
           [:read] -> :atomvm.posix_open(complete_path, [:o_rdonly])
           [:write] -> :atomvm.posix_open(complete_path, [:o_wronly, :o_creat], 0o644)
