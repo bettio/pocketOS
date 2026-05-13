@@ -33,7 +33,10 @@ defmodule MeshtasticServerTest do
     Process.register(self(), :meshtastic_server_tester)
 
     {:ok, server} =
-      :meshtastic_server.start_link({TestRadio, TestRadio, :mock}, callbacks: TestCallbacks)
+      :meshtastic_server.start_link({TestRadio, TestRadio, :mock},
+        callbacks: TestCallbacks,
+        node_id: 0xDEADCAFE
+      )
 
     iface = {:mock, :undefined}
 
@@ -63,7 +66,10 @@ defmodule MeshtasticServerTest do
     Process.register(self(), :meshtastic_server_tester)
 
     {:ok, server} =
-      :meshtastic_server.start_link({TestRadio, TestRadio, :mock}, callbacks: TestCallbacks)
+      :meshtastic_server.start_link({TestRadio, TestRadio, :mock},
+        callbacks: TestCallbacks,
+        node_id: 0xDEADCAFE
+      )
 
     iface = {:mock, :undefined}
 
