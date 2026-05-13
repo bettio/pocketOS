@@ -1,10 +1,18 @@
 defmodule MeshtasticServerTest do
   use ExUnit.Case
+  import Bitwise
   doctest PocketOS
 
   defmodule TestCallbacks do
     def message_cb(msg) do
       send(:meshtastic_server_tester, msg)
+    end
+
+    def peer_public_key(node_id) do
+      case :persistent_term.get({:test_peer_pub, node_id}, nil) do
+        nil -> {:error, :not_found}
+        pub -> {:ok, pub}
+      end
     end
   end
 
@@ -67,6 +75,72 @@ defmodule MeshtasticServerTest do
     :discard = :meshtastic_server.handle_payload(server, iface, payload_0, %{rssi: -10, snr: 12})
 
     :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "decrypt a PKI direct message" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    alice_node_id = 0xAAAAAAAA
+    bob_node_id = 0xBBBBBBBB
+    {alice_pub, alice_priv} = :crypto.generate_key(:eddh, :x25519)
+    {bob_pub, bob_priv} = :crypto.generate_key(:eddh, :x25519)
+    :persistent_term.put({:test_peer_pub, alice_node_id}, alice_pub)
+
+    text_data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "hi from alice"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    packet = %{
+      dest: bob_node_id,
+      src: alice_node_id,
+      packet_id: 0x12345678,
+      hop_start: 3,
+      via_mqtt: false,
+      want_ack: false,
+      hop_limit: 3,
+      channel_hash: 0,
+      data: text_data
+    }
+
+    wire_payload =
+      packet
+      |> :meshtastic.encrypt_pki(alice_priv, bob_pub)
+      |> :meshtastic.serialize()
+
+    {:ok, server} =
+      :meshtastic_server.start_link(
+        {TestRadio, TestRadio, :mock},
+        callbacks: TestCallbacks,
+        node_id: bob_node_id,
+        private_key: bob_priv
+      )
+
+    iface = {:mock, :undefined}
+
+    :ok = :meshtastic_server.handle_payload(server, iface, wire_payload, %{rssi: -28, snr: 11})
+
+    assert_receive(
+      %{
+        dest: ^bob_node_id,
+        src: ^alice_node_id,
+        message: %{portnum: :TEXT_MESSAGE_APP, payload: "hi from alice"}
+      },
+      5000
+    )
+
+    # Tamper: flipping any byte must cause the CCM tag check to fail.
+    <<head::binary-16, first_cipher_byte, rest::binary>> = wire_payload
+    tampered = <<head::binary, first_cipher_byte ^^^ 0x01, rest::binary>>
+
+    :discard =
+      :meshtastic_server.handle_payload(server, iface, tampered, %{rssi: -28, snr: 11})
+
+    refute_receive(_, 200)
+
+    :ok = :gen_server.stop(server)
+    :persistent_term.erase({:test_peer_pub, alice_node_id})
     Process.unregister(:meshtastic_server_tester)
   end
 

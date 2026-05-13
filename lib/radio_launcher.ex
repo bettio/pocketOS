@@ -29,6 +29,7 @@ defmodule RadioLauncher do
     IO.puts("Node Id is: #{node_id}")
 
     meshtcfg = load_cfg_map("FS0:/meshtcfg.sxp")
+    {public_key, private_key} = NodeKey.load_or_generate("FS0:/nodekey.bin")
 
     meshtastic_node_info =
       %{
@@ -39,7 +40,8 @@ defmodule RadioLauncher do
           role: :CLIENT,
           long_name: "pocketOS #{short_node_id}",
           short_name: short_node_id,
-          is_licensed: false
+          is_licensed: false,
+          public_key: public_key
         }
       }
       |> Map.merge(meshtcfg)
@@ -63,7 +65,8 @@ defmodule RadioLauncher do
            node_id: node_id,
            initial_packet_id: initial_packet_id,
            node_info: meshtastic_node_info,
-           channel: channel
+           channel: channel,
+           private_key: private_key
          ]}
       ])
   end

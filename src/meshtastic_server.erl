@@ -23,7 +23,8 @@
     node_id,
     last_seen = #{},
     node_info = #{},
-    channel = #{}
+    channel = #{},
+    private_key = undefined
 }).
 
 -define(PACKET_SEEN_EXPIRY_SEC, 30).
@@ -46,6 +47,7 @@ init([Radio, MeshtasticOpts]) ->
     InitialPacketId = proplists:get_value(initial_packet_id, MeshtasticOpts, 1),
     NodeInfo = proplists:get_value(node_info, MeshtasticOpts),
     Channel = init_channel(proplists:get_value(channel, MeshtasticOpts)),
+    PrivateKey = proplists:get_value(private_key, MeshtasticOpts),
 
     erlang:send_after(500, self(), periodic),
 
@@ -55,7 +57,8 @@ init([Radio, MeshtasticOpts]) ->
         node_id = NodeId,
         last_packet_id = InitialPacketId,
         node_info = NodeInfo,
-        channel = Channel
+        channel = Channel,
+        private_key = PrivateKey
     }}.
 
 init_channel(undefined) ->
@@ -78,9 +81,8 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
             IsRecipient = is_recipient(Packet, State),
             if
                 not Duplicated and IsRecipient ->
-                    #{psk := Psk} = State#state.channel,
-                    case meshtastic:decrypt(Packet, Psk) of
-                        #{data := Decrypted} = DecryptedPacket ->
+                    case try_decrypt(Packet, State) of
+                        {ok, #{data := Decrypted} = DecryptedPacket} ->
                             try meshtastic_proto:decode(Decrypted) of
                                 Message ->
                                     DecodedPacket = DecryptedPacket#{message => Message},
@@ -96,10 +98,10 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
                                     io:format("Failed protobuf decode: ~p.~n", [Decrypted]),
                                     {reply, discard, State}
                             end;
-                        Undecryptable ->
+                        {error, Reason} ->
                             % We don't update last seen when we receive a corrupt packet
                             % just in case next retransmision is ok
-                            io:format("Failed meshtastic decrypt: ~p.~n", [Undecryptable]),
+                            io:format("Failed meshtastic decrypt: ~p.~n", [Reason]),
                             {reply, discard, State}
                     end;
                 not Duplicated ->
@@ -158,6 +160,29 @@ maybe_callback(undefined, _, _) ->
     ok;
 maybe_callback(Mod, Callback, Arg) ->
     Mod:Callback(Arg).
+
+%% PKI mode is signaled by channel_hash == 0 on a unicast packet to us.
+%% Falls back to channel decrypt for everything else.
+try_decrypt(
+    #{channel_hash := 0, dest := Dest, src := Src} = Packet,
+    #state{node_id = Dest, private_key = OurPriv, callbacks = Cb}
+) when OurPriv =/= undefined, Dest =/= 16#FFFFFFFF ->
+    case peer_public_key(Src, Cb) of
+        {ok, PeerPub} -> meshtastic:decrypt_pki(Packet, OurPriv, PeerPub);
+        {error, _} = E -> E
+    end;
+try_decrypt(Packet, #state{channel = #{psk := Psk}}) ->
+    {ok, meshtastic:decrypt(Packet, Psk)}.
+
+peer_public_key(_NodeId, undefined) ->
+    {error, no_callbacks};
+peer_public_key(NodeId, Cb) ->
+    try Cb:peer_public_key(NodeId) of
+        {ok, _} = R -> R;
+        Other -> {error, {peer_pubkey_lookup, Other}}
+    catch
+        _:_ -> {error, peer_pubkey_lookup_failed}
+    end.
 
 is_recipient(#{dest := Dest}, #state{node_id = NodeId} = _State) ->
     case Dest of

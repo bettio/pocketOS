@@ -49,6 +49,13 @@ defmodule MeshtasticCallbacks do
     IO.puts("Got unexpected message: #{inspect(msg)}")
   end
 
+  def peer_public_key(node_id) do
+    case :micronesia.dirty_read({:meshtastic_node_info, node_id}) do
+      [{_, _, %{public_key: <<pub::binary-32>>}}] -> {:ok, pub}
+      _ -> {:error, :no_pubkey}
+    end
+  end
+
   def send_text_message(text) do
     data =
       %{portnum: :TEXT_MESSAGE_APP, payload: text}

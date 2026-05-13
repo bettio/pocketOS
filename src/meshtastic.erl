@@ -6,6 +6,8 @@
     decrypt/2,
     encrypt/1,
     encrypt/2,
+    decrypt_pki/3,
+    encrypt_pki/3,
     channel_hash/2,
     default_long_fast_psk/0,
     default_long_fast_channel/0
@@ -92,4 +94,37 @@ encrypt(Packet, Key) ->
     IV = <<PktId:64/little-unsigned, SrcAddr:32/little-unsigned, 0:32>>,
     Encrypted = crypto:crypto_one_time(aes_128_ctr, Key, IV, Data, true),
     PktWithEnc = Packet#{encrypted_data => Encrypted},
+    maps:remove(data, PktWithEnc).
+
+decrypt_pki(Packet, OurPriv, PeerPub) ->
+    #{src := SrcAddr, packet_id := PktId, encrypted_data := EncData} = Packet,
+    case EncData of
+        <<_/binary>> when byte_size(EncData) >= 12 ->
+            CipherLen = byte_size(EncData) - 12,
+            <<Ciphertext:CipherLen/binary, Tag:8/binary, ExtraNonce:32/little-unsigned>> = EncData,
+            Shared = crypto:compute_key(eddh, PeerPub, OurPriv, x25519),
+            Key = crypto:hash(sha256, Shared),
+            Nonce = <<PktId:32/little-unsigned, ExtraNonce:32/little-unsigned,
+                SrcAddr:32/little-unsigned, 0:8>>,
+            case crypto:crypto_one_time_aead(aes_256_ccm, Key, Nonce, Ciphertext, <<>>, Tag, false) of
+                error ->
+                    {error, pki_decrypt_failed};
+                Plain when is_binary(Plain) ->
+                    PktWithData = Packet#{data => Plain},
+                    {ok, maps:remove(encrypted_data, PktWithData)}
+            end;
+        _ ->
+            {error, pki_payload_too_short}
+    end.
+
+encrypt_pki(Packet, OurPriv, PeerPub) ->
+    #{src := SrcAddr, packet_id := PktId, data := Data} = Packet,
+    ExtraNonce = binary:decode_unsigned(crypto:strong_rand_bytes(4), little),
+    Shared = crypto:compute_key(eddh, PeerPub, OurPriv, x25519),
+    Key = crypto:hash(sha256, Shared),
+    Nonce = <<PktId:32/little-unsigned, ExtraNonce:32/little-unsigned, SrcAddr:32/little-unsigned,
+        0:8>>,
+    {Ciphertext, Tag} = crypto:crypto_one_time_aead(aes_256_ccm, Key, Nonce, Data, <<>>, 8, true),
+    EncData = <<Ciphertext/binary, Tag/binary, ExtraNonce:32/little-unsigned>>,
+    PktWithEnc = Packet#{encrypted_data => EncData},
     maps:remove(data, PktWithEnc).
