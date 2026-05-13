@@ -21,7 +21,9 @@ defmodule RadioLauncher do
     {:ok, periph_config} = HAL.get_peripheral_config("radio")
     complete_config = Map.merge(meshtastic_medium_fast_config, periph_config)
 
-    id_256 = HAL.unique_id_256("meshtastic")
+    {public_key, private_key} = NodeKey.load_or_generate("FS0:/nodekey.bin")
+
+    id_256 = :crypto.hash(:sha256, public_key)
     <<node_id::little-unsigned-integer-32, _discard::binary>> = id_256
     node_id_string = lpad(Integer.to_string(node_id, 16), 8)
     <<_discard::binary-6, short_node_id::binary-2>> = node_id_string
@@ -29,7 +31,6 @@ defmodule RadioLauncher do
     IO.puts("Node Id is: #{node_id}")
 
     meshtcfg = load_cfg_map("FS0:/meshtcfg.sxp")
-    {public_key, private_key} = NodeKey.load_or_generate("FS0:/nodekey.bin")
 
     meshtastic_node_info =
       %{
