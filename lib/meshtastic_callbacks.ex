@@ -1,4 +1,6 @@
 defmodule MeshtasticCallbacks do
+  require MeshTrace
+
   def init() do
     :micronesia.start()
     :micronesia.create_table(:meshtastic_message)
@@ -6,8 +8,11 @@ defmodule MeshtasticCallbacks do
     :micronesia.create_table(:meshtastic_node_info)
   end
 
-  def message_cb(%{message: %{portnum: :TEXT_MESSAGE_APP, payload: payload}, packet_id: packet_id}) do
-    IO.puts("Got text message: #{inspect(payload)}")
+  def message_cb(%{
+        message: %{portnum: :TEXT_MESSAGE_APP, payload: payload},
+        packet_id: packet_id
+      }) do
+    MeshTrace.trace("Got text message: #{inspect(payload)}")
     :micronesia.dirty_write({:meshtastic_message, packet_id, payload})
   end
 
@@ -24,7 +29,7 @@ defmodule MeshtasticCallbacks do
         },
         src: src
       }) do
-    IO.puts("Got position message: #{inspect(payload)}")
+    MeshTrace.trace("Got position message: #{inspect(payload)}")
 
     :micronesia.dirty_write(
       {:meshtastic_position, src, %{lat: lat * 0.0000001, lon: lon * 0.0000001, alt: alt}}
@@ -40,13 +45,13 @@ defmodule MeshtasticCallbacks do
       }) do
     payload_with_updated = Map.put(payload, :updated_at, :erlang.system_time(:second))
 
-    IO.puts("Got node info message: #{inspect(payload)}")
+    MeshTrace.trace("Got node info message: #{inspect(payload)}")
 
     :micronesia.dirty_write({:meshtastic_node_info, src, payload_with_updated})
   end
 
   def message_cb(msg) do
-    IO.puts("Got unexpected message: #{inspect(msg)}")
+    MeshTrace.trace("Got unexpected message: #{inspect(msg)}")
   end
 
   def peer_public_key(node_id) do
@@ -57,15 +62,20 @@ defmodule MeshtasticCallbacks do
   end
 
   def send_text_message(text) do
+    MeshTrace.trace("[mesh] send_text_message: #{inspect(text)}")
+
     data =
       %{portnum: :TEXT_MESSAGE_APP, payload: text}
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
-    :ok = :meshtastic_server.send(:meshtastic_server, 0xFFFFFFFF, data)
+    result = :meshtastic_server.send(:meshtastic_server, 0xFFFFFFFF, data)
+    MeshTrace.trace("[mesh] send_text_message result: #{inspect(result)}")
+    :ok = result
   end
 
   def send_position(%{lat: lat, lon: lon, alt: alt}) do
+    MeshTrace.trace("[mesh] send_position: lat=#{lat} lon=#{lon} alt=#{alt}")
     time = :erlang.system_time(:second)
 
     position_msg = %{
@@ -83,6 +93,8 @@ defmodule MeshtasticCallbacks do
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
-    :ok = :meshtastic_server.send(:meshtastic_server, 0xFFFFFFFF, data)
+    result = :meshtastic_server.send(:meshtastic_server, 0xFFFFFFFF, data)
+    MeshTrace.trace("[mesh] send_position result: #{inspect(result)}")
+    :ok = result
   end
 end
