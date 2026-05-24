@@ -14,9 +14,16 @@
 }).
 -define(PORTNUM_ENUM,
     {enum, #{
-        'TEXT_MESSAGE_APP' => 1, 'POSITION_APP' => 3, 'NODEINFO_APP' => 4, 'TELEMETRY_APP' => 67
+        'TEXT_MESSAGE_APP' => 1,
+        'POSITION_APP' => 3,
+        'NODEINFO_APP' => 4,
+        'ROUTING_APP' => 5,
+        'TELEMETRY_APP' => 67
     }}
 ).
+-define(ROUTING_SCHEMA, #{
+    error_reason => {3, {enum, #{'NONE' => 0}}}
+}).
 -define(POSITION_SCHEMA, #{
     time => {4, sfixed32},
     latitude_i => {1, sfixed32},
@@ -102,6 +109,10 @@ encode(Map) ->
             aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA);
         #{portnum := 'NODEINFO_APP', payload := PayloadMap} ->
             Payload = aprotobuf_encoder:encode(PayloadMap, ?USER_SCHEMA),
+            NewMap = Map#{payload := Payload},
+            aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA);
+        #{portnum := 'ROUTING_APP', payload := PayloadMap} ->
+            Payload = aprotobuf_encoder:encode(PayloadMap, ?ROUTING_SCHEMA),
             NewMap = Map#{payload := Payload},
             aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA)
     end.

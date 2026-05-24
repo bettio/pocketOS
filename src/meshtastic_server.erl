@@ -120,9 +120,13 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
                                     maybe_callback(
                                         State#state.callbacks, message_cb, DecodedPacket
                                     ),
-                                    RebroadcastState = maybe_rebroadcast(Packet, State#state{
-                                        last_seen = PrunedLastSeen
-                                    }),
+                                    StateAfterAck = maybe_send_ack(
+                                        Packet,
+                                        Message,
+                                        Src,
+                                        State#state{last_seen = PrunedLastSeen}
+                                    ),
+                                    RebroadcastState = maybe_rebroadcast(Packet, StateAfterAck),
                                     {reply, ok, RebroadcastState}
                             catch
                                 _:_ ->
@@ -239,6 +243,29 @@ generate_packet_id(Rolling) ->
     <<TopRand:22, _:10>> = crypto:strong_rand_bytes(4),
     PacketId = NextRolling bor (TopRand bsl 10),
     {PacketId, NextRolling}.
+
+maybe_send_ack(
+    #{want_ack := true, dest := Dest, packet_id := OrigPid},
+    Message,
+    Src,
+    #state{node_id = Dest} = State
+) when Dest =/= 16#FFFFFFFF ->
+    case maps:is_key(request_id, Message) of
+        true ->
+            State;
+        false ->
+            AckData = #{
+                portnum => 'ROUTING_APP',
+                payload => #{error_reason => 'NONE'},
+                request_id => OrigPid
+            },
+            AckBin = erlang:iolist_to_binary(meshtastic_proto:encode(AckData)),
+            ?MESH_TRACE("[mesh] ack pid=~p -> src=~p~n", [OrigPid, Src]),
+            {reply, ok, NewState} = handle_call({send, Src, AckBin}, undefined, State),
+            NewState
+    end;
+maybe_send_ack(_, _, _, State) ->
+    State.
 
 is_recipient(#{dest := Dest}, #state{node_id = NodeId} = _State) ->
     case Dest of
