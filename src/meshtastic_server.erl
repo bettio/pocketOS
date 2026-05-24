@@ -19,7 +19,7 @@
 -record(state, {
     radio,
     callbacks,
-    last_packet_id,
+    rolling_packet_id,
     node_id,
     last_seen = #{},
     node_info = #{},
@@ -27,7 +27,16 @@
     private_key = undefined
 }).
 
+-ifdef(MESH_TRACE_ENABLED).
+-define(MESH_TRACE(Format, Args), io:format(Format, Args)).
+-else.
+-define(MESH_TRACE(Format, Args), ok).
+-endif.
+
 -define(PACKET_SEEN_EXPIRY_SEC, 30).
+%% Mirror Meshtastic Router::generatePacketId: bottom 10 bits = rolling counter,
+%% top 22 bits = fresh random per packet. Initial rolling value is random at boot.
+-define(PACKET_ID_COUNTER_MASK, 16#3FF).
 
 start_link(Radio, MeshtasticOpts) ->
     gen_server:start_link(?MODULE, [Radio, MeshtasticOpts], []).
@@ -44,10 +53,11 @@ send(Server, DestAddr, Data) ->
 init([Radio, MeshtasticOpts]) ->
     Callbacks = proplists:get_value(callbacks, MeshtasticOpts),
     NodeId = proplists:get_value(node_id, MeshtasticOpts, 1127302788),
-    InitialPacketId = proplists:get_value(initial_packet_id, MeshtasticOpts, 1),
     NodeInfo = proplists:get_value(node_info, MeshtasticOpts),
     Channel = init_channel(proplists:get_value(channel, MeshtasticOpts)),
     PrivateKey = proplists:get_value(private_key, MeshtasticOpts),
+    <<InitialRolling:32>> = crypto:strong_rand_bytes(4),
+    ?MESH_TRACE("[mesh] init node_id=~p initial_rolling=~p~n", [NodeId, InitialRolling]),
 
     erlang:send_after(500, self(), periodic),
 
@@ -55,7 +65,7 @@ init([Radio, MeshtasticOpts]) ->
         radio = Radio,
         callbacks = Callbacks,
         node_id = NodeId,
-        last_packet_id = InitialPacketId,
+        rolling_packet_id = InitialRolling,
         node_info = NodeInfo,
         channel = Channel,
         private_key = PrivateKey
@@ -69,10 +79,31 @@ init_channel(#{name := Name, psk := Psk} = Channel) ->
 handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, State) ->
     ThisNodeAddress = State#state.node_id,
     case meshtastic:parse(Payload) of
-        {ok, #{src := ThisNodeAddress} = Packet} ->
-            io:format("Discarding packet from this node: ~p.~n", [Packet]),
+        {ok, #{src := ThisNodeAddress} = _Packet} ->
+            ?MESH_TRACE("Discarding packet from this node: ~p.~n", [_Packet]),
             {reply, discard, State};
-        {ok, #{hop_limit := _HopLimit, src := Src, packet_id := PacketId} = Packet} ->
+        {ok,
+            #{
+                hop_limit := _HopLimit,
+                src := Src,
+                packet_id := PacketId,
+                dest := _Dest,
+                channel_hash := _ChannelHash,
+                encrypted_data := _EncData
+            } = Packet} ->
+            ?MESH_TRACE(
+                "[mesh] rx src=~p pid=~p [low10=~p hi22=~p] dest=~p ch=~p hop=~p enc_bytes=~p~n",
+                [
+                    Src,
+                    PacketId,
+                    PacketId band 16#3FF,
+                    PacketId bsr 10,
+                    _Dest,
+                    _ChannelHash,
+                    _HopLimit,
+                    byte_size(_EncData)
+                ]
+            ),
             MonotonicTS = erlang:monotonic_time(second),
             {Duplicated, UpdatedLastSeen} = update_last_seen(
                 State#state.last_seen, Src, PacketId, MonotonicTS
@@ -95,24 +126,30 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
                                     {reply, ok, RebroadcastState}
                             catch
                                 _:_ ->
-                                    io:format("Failed protobuf decode: ~p.~n", [Decrypted]),
+                                    ?MESH_TRACE("Failed protobuf decode: ~p.~n", [Decrypted]),
                                     {reply, discard, State}
                             end;
-                        {error, Reason} ->
+                        {error, _Reason} ->
                             % We don't update last seen when we receive a corrupt packet
                             % just in case next retransmision is ok
-                            io:format("Failed meshtastic decrypt: ~p.~n", [Reason]),
+                            ?MESH_TRACE("Failed meshtastic decrypt: ~p.~n", [_Reason]),
                             {reply, discard, State}
                     end;
                 not Duplicated ->
+                    ?MESH_TRACE(
+                        "[mesh] rx not-for-us, will forward: src=~p pid=~p~n",
+                        [Src, PacketId]
+                    ),
                     RebroadcastState = maybe_rebroadcast(Packet, State#state{
                         last_seen = PrunedLastSeen
                     }),
                     {reply, ok, RebroadcastState};
                 true ->
+                    ?MESH_TRACE("[mesh] rx duplicate src=~p pid=~p~n", [Src, PacketId]),
                     {reply, discard, State}
             end;
         _SomethingElse ->
+            ?MESH_TRACE("[mesh] rx parse-failed: ~p~n", [_SomethingElse]),
             {reply, next, State}
     end;
 handle_call(
@@ -121,11 +158,11 @@ handle_call(
     #state{
         radio = {_RadioId, RadioModule, Radio},
         node_id = NodeId,
-        last_packet_id = LastPacketId,
+        rolling_packet_id = Rolling,
         channel = #{psk := Psk, hash := ChannelHash}
     } = State
 ) ->
-    PacketId = LastPacketId + 1,
+    {PacketId, NextRolling} = generate_packet_id(Rolling),
 
     Packet = #{
         dest => DestAddr,
@@ -142,8 +179,21 @@ handle_call(
     Encrypted = meshtastic:encrypt(Packet, Psk),
 
     RadioPayload = meshtastic:serialize(Encrypted),
-    RadioModule:broadcast(Radio, RadioPayload),
-    {reply, ok, State#state{last_packet_id = PacketId}};
+    ?MESH_TRACE(
+        "[mesh] tx pid=~p [low10=~p hi22=~p] dest=~p ch=~p data_bytes=~p wire_bytes=~p~n",
+        [
+            PacketId,
+            PacketId band 16#3FF,
+            PacketId bsr 10,
+            DestAddr,
+            ChannelHash,
+            byte_size(Data),
+            byte_size(RadioPayload)
+        ]
+    ),
+    _BroadcastResult = RadioModule:broadcast(Radio, RadioPayload),
+    ?MESH_TRACE("[mesh] tx pid=~p -> ~p~n", [PacketId, _BroadcastResult]),
+    {reply, ok, State#state{rolling_packet_id = NextRolling}};
 handle_call(_msg, _from, State) ->
     {reply, error, State}.
 
@@ -184,6 +234,12 @@ peer_public_key(NodeId, Cb) ->
         _:_ -> {error, peer_pubkey_lookup_failed}
     end.
 
+generate_packet_id(Rolling) ->
+    NextRolling = (Rolling + 1) band ?PACKET_ID_COUNTER_MASK,
+    <<TopRand:22, _:10>> = crypto:strong_rand_bytes(4),
+    PacketId = NextRolling bor (TopRand bsl 10),
+    {PacketId, NextRolling}.
+
 is_recipient(#{dest := Dest}, #state{node_id = NodeId} = _State) ->
     case Dest of
         NodeId -> true;
@@ -191,15 +247,25 @@ is_recipient(#{dest := Dest}, #state{node_id = NodeId} = _State) ->
         _ -> false
     end.
 
-maybe_rebroadcast(#{dest := Dest}, #state{node_id = Dest} = State) ->
-    State;
-maybe_rebroadcast(#{hop_limit := 0} = _Packet, State) ->
+maybe_rebroadcast(#{dest := Dest, src := _Src, packet_id := _Pid}, #state{node_id = Dest} = State) ->
+    ?MESH_TRACE("[mesh] rebroadcast skip (unicast-to-us): src=~p pid=~p~n", [_Src, _Pid]),
     State;
 maybe_rebroadcast(
-    #{hop_limit := HopLimit} = Packet, #state{radio = {_RadioId, RadioModule, Radio}} = State
+    #{hop_limit := 0, src := _Src, packet_id := _Pid} = _Packet, State
+) ->
+    ?MESH_TRACE("[mesh] rebroadcast skip (hop=0): src=~p pid=~p~n", [_Src, _Pid]),
+    State;
+maybe_rebroadcast(
+    #{hop_limit := HopLimit, src := _Src, packet_id := _Pid} = Packet,
+    #state{radio = {_RadioId, RadioModule, Radio}} = State
 ) ->
     RadioPayload = meshtastic:serialize(Packet#{hop_limit := HopLimit - 1}),
-    RadioModule:broadcast(Radio, RadioPayload),
+    ?MESH_TRACE(
+        "[mesh] rebroadcast src=~p pid=~p hop=~p->~p wire_bytes=~p~n",
+        [_Src, _Pid, HopLimit, HopLimit - 1, byte_size(RadioPayload)]
+    ),
+    _BroadcastResult = RadioModule:broadcast(Radio, RadioPayload),
+    ?MESH_TRACE("[mesh] rebroadcast pid=~p -> ~p~n", [_Pid, _BroadcastResult]),
     State.
 
 % returns: {AlreadySeen, UpdatedLastSeenMap}
@@ -247,7 +313,7 @@ do_periodic_broadcast(#state{node_info = #{user_info := UserInfo}} = State) ->
         portnum => 'NODEINFO_APP',
         payload => UserInfo
     },
-    io:format("Broadcasting user info: ~p.~n", [UserInfo]),
+    ?MESH_TRACE("Broadcasting user info: ~p.~n", [UserInfo]),
 
     Encoded = meshtastic_proto:encode(Data),
     Bin = erlang:iolist_to_binary(Encoded),
@@ -258,5 +324,5 @@ do_periodic_broadcast(#state{node_info = #{user_info := UserInfo}} = State) ->
 
     NewState;
 do_periodic_broadcast(State) ->
-    io:format("Missing user_info, skipping periodic broadcast.~n"),
+    ?MESH_TRACE("Missing user_info, skipping periodic broadcast.~n", []),
     State.

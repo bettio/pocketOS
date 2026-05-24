@@ -49,9 +49,6 @@ defmodule RadioLauncher do
 
     IO.puts("Node info is: #{inspect(meshtastic_node_info)}")
 
-    initial_packet_id = :erlang.system_time(:second)
-    IO.puts("Initial packet id is: #{initial_packet_id}")
-
     channel =
       case Map.get(meshtcfg, :channel_name) do
         nil -> :meshtastic.default_long_fast_channel()
@@ -64,7 +61,6 @@ defmodule RadioLauncher do
          [
            callbacks: MeshtasticCallbacks,
            node_id: node_id,
-           initial_packet_id: initial_packet_id,
            node_info: meshtastic_node_info,
            channel: channel,
            private_key: private_key
