@@ -14,7 +14,11 @@ defmodule RadioLauncher do
         sync_word: 0x2B,
         header_mode: :explicit,
         invert_iq: false,
-        enable_crc: false
+        enable_crc: true,
+        dio2_as_rf_switch: true,
+        tcxo_delay: 320,
+        regulator_mode: :dc_dc,
+        rx_boosted_gain: true
       }
       |> Map.merge(load_cfg_map("FS0:/radi0cfg.sxp"))
 

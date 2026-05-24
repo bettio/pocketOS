@@ -374,7 +374,8 @@ defmodule HAL do
            device_name: :radio,
            irq: 45,
            reset: 17,
-           busy: 13
+           busy: 13,
+           tcxo_voltage: :v_18
          }}
     end
   end
@@ -392,7 +393,8 @@ defmodule HAL do
            device_name: :radio,
            irq: 14,
            reset: 47,
-           busy: 48
+           busy: 48,
+           tcxo_voltage: :v_30
          }}
     end
   end
