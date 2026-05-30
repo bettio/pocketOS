@@ -174,4 +174,151 @@ defmodule MeshtasticServerTest do
     :ok = :gen_server.stop(server)
     Process.unregister(:meshtastic_server_tester)
   end
+
+  test "a NodeInfo request with want_response gets an automatic reply" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+    orig_pid = 0x11223344
+
+    our_user_info = %{
+      id: "!deadcafe",
+      long_name: "pocketOS test",
+      short_name: "dc",
+      hw_model: 50,
+      role: :CLIENT,
+      is_licensed: false,
+      macaddr: <<0xDE, 0xAD, 0xCA, 0xFE, 0x00, 0x01>>,
+      public_key: :binary.copy(<<0>>, 32)
+    }
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us,
+        node_info: %{user_info: our_user_info}
+      )
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    req_data =
+      %{
+        portnum: :NODEINFO_APP,
+        payload: %{id: "!aaaaaaaa", long_name: "peer", short_name: "pe", hw_model: 50},
+        want_response: true
+      }
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    wire =
+      %{
+        dest: us,
+        src: peer,
+        packet_id: orig_pid,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        data: req_data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, wire, %{rssi: -28, snr: 11})
+
+    # want_response is exposed to the callback
+    assert_receive(
+      %{
+        src: ^peer,
+        want_response: true,
+        message: %{portnum: :NODEINFO_APP, payload: %{long_name: "peer"}}
+      },
+      5000
+    )
+
+    # and we unicast our own NodeInfo back to the requester, tagged with its packet id
+    reply_wire =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("expected a NodeInfo reply")
+      end
+
+    {:ok, reply_pkt} = :meshtastic.parse(reply_wire)
+    assert reply_pkt.dest == peer
+    assert reply_pkt.src == us
+
+    reply_msg =
+      reply_pkt
+      |> :meshtastic.decrypt(:meshtastic.default_long_fast_psk())
+      |> Map.fetch!(:data)
+      |> :meshtastic_proto.decode()
+
+    assert reply_msg.portnum == :NODEINFO_APP
+    assert reply_msg.request_id == orig_pid
+    assert reply_msg.payload.long_name == "pocketOS test"
+    assert reply_msg.payload.short_name == "dc"
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "a non-NodeInfo packet with want_response gets no reply" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us,
+        node_info: %{user_info: %{id: "!deadcafe", long_name: "pocketOS test", short_name: "dc"}}
+      )
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    req_data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "ping", want_response: true}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    wire =
+      %{
+        dest: us,
+        src: peer,
+        packet_id: 0x55667788,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        data: req_data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, wire, %{rssi: -28, snr: 11})
+
+    # exposure still works for non-NodeInfo portnums
+    assert_receive(
+      %{src: ^peer, want_response: true, message: %{portnum: :TEXT_MESSAGE_APP, payload: "ping"}},
+      5000
+    )
+
+    # but the auto-reply is NodeInfo-only, so nothing is transmitted back
+    # (the periodic NodeInfo broadcast fires at 500ms, well after this 200ms window)
+    receive do
+      bin when is_binary(bin) -> flunk("did not expect a reply, got: #{inspect(bin)}")
+    after
+      200 -> :ok
+    end
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
 end

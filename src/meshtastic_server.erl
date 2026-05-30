@@ -116,17 +116,21 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
                         {ok, #{data := Decrypted} = DecryptedPacket} ->
                             try meshtastic_proto:decode(Decrypted) of
                                 Message ->
-                                    DecodedPacket = DecryptedPacket#{message => Message},
+                                    WantResponse = maps:get(want_response, Message, false),
+                                    DecodedPacket = DecryptedPacket#{
+                                        message => Message,
+                                        want_response => WantResponse
+                                    },
                                     maybe_callback(
                                         State#state.callbacks, message_cb, DecodedPacket
                                     ),
-                                    StateAfterAck = maybe_send_ack(
-                                        Packet,
-                                        Message,
-                                        Src,
-                                        State#state{last_seen = PrunedLastSeen}
+                                    BaseState = State#state{last_seen = PrunedLastSeen},
+                                    StateAfterReplies = maybe_send_replies(
+                                        Packet, Message, Src, BaseState
                                     ),
-                                    RebroadcastState = maybe_rebroadcast(Packet, StateAfterAck),
+                                    RebroadcastState = maybe_rebroadcast(
+                                        Packet, StateAfterReplies
+                                    ),
                                     {reply, ok, RebroadcastState}
                             catch
                                 _:_ ->
@@ -267,6 +271,24 @@ maybe_send_ack(
 maybe_send_ack(_, _, _, State) ->
     State.
 
+%% NodeInfo response is handled in meshtastic_server by design.
+maybe_send_replies(Packet, Message, Src, State) ->
+    case maybe_send_node_info_reply(Packet, Message, Src, State) of
+        {true, NewState} -> NewState;
+        {false, NewState} -> maybe_send_ack(Packet, Message, Src, NewState)
+    end.
+
+maybe_send_node_info_reply(
+    #{packet_id := OrigPid},
+    #{portnum := 'NODEINFO_APP', want_response := true},
+    Src,
+    #state{node_info = #{user_info := _UserInfo}} = State
+) ->
+    ?MESH_TRACE("[mesh] node_info reply -> src=~p req=~p~n", [Src, OrigPid]),
+    {true, send_node_info(Src, #{request_id => OrigPid}, State)};
+maybe_send_node_info_reply(_Packet, _Message, _Src, State) ->
+    {false, State}.
+
 is_recipient(#{dest := Dest}, #state{node_id = NodeId} = _State) ->
     case Dest of
         NodeId -> true;
@@ -335,21 +357,20 @@ prune_expired_last_seen(LastSeenMap, MonotonicSec) ->
 %% Handle protobuf payloads
 %%
 
-do_periodic_broadcast(#state{node_info = #{user_info := UserInfo}} = State) ->
-    Data = #{
-        portnum => 'NODEINFO_APP',
-        payload => UserInfo
-    },
-    ?MESH_TRACE("Broadcasting user info: ~p.~n", [UserInfo]),
-
-    Encoded = meshtastic_proto:encode(Data),
-    Bin = erlang:iolist_to_binary(Encoded),
-
-    {reply, ok, NewState} = handle_call({send, 16#FFFFFFFF, Bin}, undefined, State),
-
+do_periodic_broadcast(#state{node_info = #{user_info := _UserInfo}} = State) ->
+    ?MESH_TRACE("Broadcasting user info: ~p.~n", [_UserInfo]),
+    NewState = send_node_info(16#FFFFFFFF, #{}, State),
     erlang:send_after(60000, self(), periodic),
-
     NewState;
 do_periodic_broadcast(State) ->
     ?MESH_TRACE("Missing user_info, skipping periodic broadcast.~n", []),
+    State.
+
+send_node_info(Dest, Extra, #state{node_info = #{user_info := UserInfo}} = State) ->
+    Data = maps:merge(#{portnum => 'NODEINFO_APP', payload => UserInfo}, Extra),
+    Bin = erlang:iolist_to_binary(meshtastic_proto:encode(Data)),
+    {reply, ok, NewState} = handle_call({send, Dest, Bin}, undefined, State),
+    NewState;
+send_node_info(_Dest, _Extra, State) ->
+    ?MESH_TRACE("Missing user_info, skipping node info send.~n", []),
     State.
