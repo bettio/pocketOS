@@ -9,6 +9,7 @@
     decrypt_pki/3,
     encrypt_pki/3,
     channel_hash/2,
+    relay_node_byte/1,
     default_long_fast_psk/0,
     default_long_fast_channel/0
 ]).
@@ -17,7 +18,7 @@ parse(Payload) ->
     case Payload of
         <<DestAddr:32/little-unsigned-integer, SrcAddr:32/little-unsigned-integer,
             PktId:32/little-unsigned-integer, HopStart:3, ViaMqtt:1, WantAck:1, HopLimit:3,
-            ChannelHash:8, _Padding:16, Data/binary>> ->
+            ChannelHash:8, NextHop:8, RelayNode:8, Data/binary>> ->
             {ok, #{
                 dest => DestAddr,
                 src => SrcAddr,
@@ -27,6 +28,8 @@ parse(Payload) ->
                 want_ack => to_bool(WantAck),
                 hop_limit => HopLimit,
                 channel_hash => ChannelHash,
+                next_hop => NextHop,
+                relay_node => RelayNode,
                 encrypted_data => Data
             }};
         _Invalid ->
@@ -45,16 +48,24 @@ serialize(#{
     want_ack := WantAckBool,
     hop_limit := HopLimit,
     channel_hash := ChannelHash,
+    next_hop := NextHop,
+    relay_node := RelayNode,
     encrypted_data := Data
 }) ->
     ViaMqtt = bool_to_int(ViaMqttBool),
     WantAck = bool_to_int(WantAckBool),
     <<DestAddr:32/little-unsigned-integer, SrcAddr:32/little-unsigned-integer,
         PktId:32/little-unsigned-integer, HopStart:3, ViaMqtt:1, WantAck:1, HopLimit:3,
-        ChannelHash:8, 0:16, Data/binary>>.
+        ChannelHash:8, NextHop:8, RelayNode:8, Data/binary>>.
 
 bool_to_int(false) -> 0;
 bool_to_int(true) -> 1.
+
+relay_node_byte(NodeNum) ->
+    case NodeNum band 16#FF of
+        0 -> 16#FF;
+        Byte -> Byte
+    end.
 
 decrypt(Packet) ->
     decrypt(Packet, default_long_fast_psk()).

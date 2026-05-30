@@ -107,6 +107,8 @@ defmodule MeshtasticServerTest do
       want_ack: false,
       hop_limit: 3,
       channel_hash: 0,
+      next_hop: 0,
+      relay_node: 0,
       data: text_data
     }
 
@@ -221,6 +223,8 @@ defmodule MeshtasticServerTest do
         want_ack: false,
         hop_limit: 3,
         channel_hash: channel_hash,
+        next_hop: 0,
+        relay_node: 0,
         data: req_data
       }
       |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
@@ -296,6 +300,8 @@ defmodule MeshtasticServerTest do
         want_ack: false,
         hop_limit: 3,
         channel_hash: channel_hash,
+        next_hop: 0,
+        relay_node: 0,
         data: req_data
       }
       |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
@@ -314,6 +320,176 @@ defmodule MeshtasticServerTest do
     # (the periodic NodeInfo broadcast fires at 500ms, well after this 200ms window)
     receive do
       bin when is_binary(bin) -> flunk("did not expect a reply, got: #{inspect(bin)}")
+    after
+      200 -> :ok
+    end
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "rebroadcast floods a broadcast and stamps our relay_node" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us
+      )
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "relay me"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    # A broadcast we should forward (flood). relay_node gets overwritten with
+    # ours; next_hop stays 0.
+    wire =
+      %{
+        dest: 0xFFFFFFFF,
+        src: peer,
+        packet_id: 0x0BADF00D,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        next_hop: 0,
+        relay_node: 0xAA,
+        data: data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, wire, %{rssi: -20, snr: 5})
+
+    rebroadcast =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("expected a rebroadcast")
+      end
+
+    {:ok, p} = :meshtastic.parse(rebroadcast)
+    assert p.packet_id == 0x0BADF00D
+    # hop_limit decremented, next_hop stays 0 (flood), relay_node = our last byte
+    assert p.hop_limit == 2
+    assert p.next_hop == 0
+    assert p.relay_node == 0xFE
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "rebroadcast clears next_hop when the packet was directed at us" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+    dest = 0x11112222
+    our_byte = :meshtastic.relay_node_byte(us)
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us
+      )
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "fwd"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    # A DM for someone else that names us as the next hop.
+    wire =
+      %{
+        dest: dest,
+        src: peer,
+        packet_id: 0x0BADF00D,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        next_hop: our_byte,
+        relay_node: 0xAA,
+        data: data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, wire, %{rssi: -20, snr: 5})
+
+    rebroadcast =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("expected a rebroadcast")
+      end
+
+    {:ok, p} = :meshtastic.parse(rebroadcast)
+    # next_hop cleared so the flood continues; relay_node still stamped to us
+    assert p.next_hop == 0
+    assert p.relay_node == our_byte
+    assert p.hop_limit == 2
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "no rebroadcast when the packet is directed at another node" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+    dest = 0x11112222
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us
+      )
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "not mine"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    # A directed DM whose next_hop names a different node (0x77, not our 0xFE).
+    wire =
+      %{
+        dest: dest,
+        src: peer,
+        packet_id: 0x0BADF00D,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        next_hop: 0x77,
+        relay_node: 0xAA,
+        data: data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, wire, %{rssi: -20, snr: 5})
+
+    # The named relay handles it, not us -- nothing should be transmitted.
+    receive do
+      bin when is_binary(bin) -> flunk("did not expect a rebroadcast, got: #{inspect(bin)}")
     after
       200 -> :ok
     end

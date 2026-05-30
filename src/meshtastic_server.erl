@@ -181,6 +181,8 @@ handle_call(
         want_ack => false,
         hop_limit => 3,
         channel_hash => ChannelHash,
+        next_hop => 0,
+        relay_node => meshtastic:relay_node_byte(NodeId),
         data => Data
     },
 
@@ -305,17 +307,34 @@ maybe_rebroadcast(
     ?MESH_TRACE("[mesh] rebroadcast skip (hop=0): src=~p pid=~p~n", [_Src, _Pid]),
     State;
 maybe_rebroadcast(
-    #{hop_limit := HopLimit, src := _Src, packet_id := _Pid} = Packet,
-    #state{radio = {_RadioId, RadioModule, Radio}} = State
+    #{hop_limit := HopLimit, next_hop := NextHop, src := _Src, packet_id := _Pid} = Packet,
+    #state{radio = {_RadioId, RadioModule, Radio}, node_id = NodeId} = State
 ) ->
-    RadioPayload = meshtastic:serialize(Packet#{hop_limit := HopLimit - 1}),
-    ?MESH_TRACE(
-        "[mesh] rebroadcast src=~p pid=~p hop=~p->~p wire_bytes=~p~n",
-        [_Src, _Pid, HopLimit, HopLimit - 1, byte_size(RadioPayload)]
-    ),
-    _BroadcastResult = RadioModule:broadcast(Radio, RadioPayload),
-    ?MESH_TRACE("[mesh] rebroadcast pid=~p -> ~p~n", [_Pid, _BroadcastResult]),
-    State.
+    RelayByte = meshtastic:relay_node_byte(NodeId),
+    if
+        NextHop =/= 0 andalso NextHop =/= RelayByte ->
+            %% Directed at another node: relaying is its job, not ours.
+            ?MESH_TRACE(
+                "[mesh] rebroadcast skip (next_hop=~p not us): src=~p pid=~p~n",
+                [NextHop, _Src, _Pid]
+            ),
+            State;
+        true ->
+            %% Flood (next_hop=0) or directed at us: forward as a flood. We don't
+            %% learn routes, so the relayed copy always carries next_hop=0.
+            RadioPayload = meshtastic:serialize(Packet#{
+                hop_limit := HopLimit - 1,
+                next_hop := 0,
+                relay_node := RelayByte
+            }),
+            ?MESH_TRACE(
+                "[mesh] rebroadcast src=~p pid=~p hop=~p->~p relay=~p wire_bytes=~p~n",
+                [_Src, _Pid, HopLimit, HopLimit - 1, RelayByte, byte_size(RadioPayload)]
+            ),
+            _BroadcastResult = RadioModule:broadcast(Radio, RadioPayload),
+            ?MESH_TRACE("[mesh] rebroadcast pid=~p -> ~p~n", [_Pid, _BroadcastResult]),
+            State
+    end.
 
 % returns: {AlreadySeen, UpdatedLastSeenMap}
 update_last_seen(LastSeenMap, Source, PacketId, MonotonicSec) ->
