@@ -139,14 +139,17 @@ waiting_to_receive(info, agc_reset, State) ->
     do_agc_reset(State),
     erlang:send_after(?AGC_RESET_INTERVAL_MS, self(), agc_reset),
     {next_state, waiting_to_receive, State};
-%% TODO: decide whether channel-busy retry belongs here or on the caller side
 waiting_to_receive({call, From}, {broadcast, Message}, State) ->
-    case wait_channel_free(State#state.spi, State#state.busy_pin, 10) of
+    case wait_channel_free(State#state.spi, State#state.busy_pin) of
         ok ->
-            ok = do_broadcast(State#state.spi, State#state.config, Message),
-            {next_state, waiting_tx_done, State#state{pending = From}, [
-                {state_timeout, 9000, {error, tx_timeout}}
-            ]};
+            case do_broadcast(State#state.spi, State#state.config, Message) of
+                ok ->
+                    {next_state, waiting_tx_done, State#state{pending = From}, [
+                        {state_timeout, 9000, {error, tx_timeout}}
+                    ]};
+                Error ->
+                    {next_state, waiting_to_receive, State, [{reply, From, Error}]}
+            end;
         Error ->
             {next_state, waiting_to_receive, State, [{reply, From, Error}]}
     end;
@@ -393,9 +396,7 @@ do_broadcast(SPI, Config, Data) ->
     end.
 
 %% @private
-wait_channel_free(_SPI, _BusyPin, 0) ->
-    {error, channel_busy};
-wait_channel_free(SPI, BusyPin, Retries) ->
+wait_channel_free(SPI, BusyPin) ->
     case maybe_wait_until_not_busy(BusyPin, 100) of
         ok ->
             IRQFlags = sx126x_cmd:get_irq_status(SPI),
@@ -404,8 +405,7 @@ wait_channel_free(SPI, BusyPin, Retries) ->
                     lists:member(header_valid, IRQFlags)
             of
                 true ->
-                    timer:sleep(10),
-                    wait_channel_free(SPI, BusyPin, Retries - 1);
+                    {error, channel_busy};
                 false ->
                     ok
             end;

@@ -17,15 +17,38 @@ defmodule MeshtasticServerTest do
   end
 
   defmodule TestRadio do
+    # Pop the next programmed broadcast result for this radio handle, defaulting
+    # to :ok (the original always-succeed behaviour). Tests program a queue of
+    # results via :persistent_term to exercise the retry/back-off path.
+    defp next_result(handle) do
+      case :persistent_term.get({:test_radio_results, handle}, []) do
+        [r | rest] ->
+          :persistent_term.put({:test_radio_results, handle}, rest)
+          r
+
+        [] ->
+          :ok
+      end
+    end
+
     def broadcast(:mock, payload) do
       :io.format("Going to send ~p~n", [payload])
-      :ok
+      next_result(:mock)
     end
 
     def broadcast(pid, payload) do
-      :io.format("Going to send ~p~n", [payload])
-      send(pid, payload)
-      :ok
+      # Only a successful send is observable to the test (mirrors a real radio:
+      # a busy/failed TX never reaches the air), so the retry path is provable.
+      case next_result(pid) do
+        :ok ->
+          :io.format("Going to send ~p~n", [payload])
+          send(pid, payload)
+          :ok
+
+        {:error, _} = err ->
+          :io.format("Simulated tx failure ~p~n", [err])
+          err
+      end
     end
   end
 
@@ -176,6 +199,36 @@ defmodule MeshtasticServerTest do
     end
 
     :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "a busy channel is retried until it succeeds (message not lost, server survives)" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    # First broadcast reports the channel busy; the back-off retry must succeed.
+    :persistent_term.put({:test_radio_results, self()}, [{:error, :channel_busy}])
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()}, callbacks: TestCallbacks)
+
+    test_data =
+      <<8, 1, 18, 14, 99, 105, 97, 111, 110, 101, 32, 97, 32, 116, 117, 116, 116, 105, 72, 0>>
+
+    :ok = :meshtastic_server.send(server, 0xFFFFFFFF, test_data)
+
+    # The first attempt failed (nothing observable); only the retry delivers it.
+    receive do
+      bin when is_binary(bin) ->
+        assert :meshtastic.parse(bin) |> elem(1) |> :meshtastic.decrypt() |> Map.fetch!(:data) ==
+                 test_data
+    after
+      5000 -> flunk("payload was never re-broadcast after channel_busy")
+    end
+
+    assert Process.alive?(server)
+
+    :ok = :gen_server.stop(server)
+    :persistent_term.erase({:test_radio_results, self()})
     Process.unregister(:meshtastic_server_tester)
   end
 

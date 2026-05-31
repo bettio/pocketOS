@@ -119,21 +119,24 @@ deliver(undefined, _DecodedPacket) ->
 deliver(Callbacks, DecodedPacket) ->
     Callbacks:message_cb(DecodedPacket).
 
-%% Drain every due transmission from the core's tx_queue out to the radio, then
-%% schedule a wake-up for the earliest not-yet-due intent (none today, so no
-%% timer is armed). The broadcast result is ignored, as before.
+%% Drain due TX; the core re-enqueues failed sends with a back-off, then arm tx_pump.
+%% TODO: coalesce tx_pump timers; we arm one per deferred pump (harmless idempotent no-ops).
 pump_tx(#state{radio = {_RadioId, RadioModule, Radio}, core = Core0} = State) ->
     Now = erlang:monotonic_time(millisecond),
-    {DuePayloads, Core1} = meshtastic_server_core:take_due(Core0, Now),
-    lists:foreach(
-        fun(Payload) -> RadioModule:broadcast(Radio, Payload) end,
-        DuePayloads
+    {DueIntents, Core1} = meshtastic_server_core:take_due(Core0, Now),
+    Results = lists:map(
+        fun(#{payload := Payload} = Intent) ->
+            {Intent, RadioModule:broadcast(Radio, Payload)}
+        end,
+        DueIntents
     ),
-    case meshtastic_server_core:next_wakeup(Core1, Now) of
+    Env = #{now => Now, rand22 => rand22()},
+    Core2 = meshtastic_server_core:handle_tx_results(Results, Env, Core1),
+    case meshtastic_server_core:next_wakeup(Core2, Now) of
         infinity -> ok;
         Delay -> erlang:send_after(Delay, self(), tx_pump)
     end,
-    State#state{core = Core1}.
+    State#state{core = Core2}.
 
 %%------------------------------------------------------------------------------
 %% PKI peer-key pre-resolution

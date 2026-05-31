@@ -24,6 +24,7 @@
     rx_needs_peer_key/2,
     next_packet_id/2,
     take_due/2,
+    handle_tx_results/3,
     next_wakeup/2,
     update_last_seen/4,
     prune_expired_last_seen/2
@@ -57,11 +58,14 @@
     peer_key => {ok, binary()} | {error, term()}
 }.
 
-%% A queued transmission.
-%% `not_before` is `now` (send on the next pump) or an
-%% absolute monotonic-millisecond deadline (the seam for future back-off /
-%% SNR-weighted delays). Today the core only ever enqueues `now`.
--type tx_intent() :: #{payload := binary(), not_before := now | integer()}.
+%% A queued transmission. `not_before` is `now` (send on the next pump) or an
+%% absolute monotonic-ms back-off deadline (a send the radio failed is re-enqueued
+%% with one). `attempts` sizes the back-off, never bounds retries.
+-type tx_intent() :: #{
+    payload := binary(),
+    not_before := now | integer(),
+    attempts => non_neg_integer()
+}.
 
 -define(PACKET_SEEN_EXPIRY_SEC, 30).
 %% Mirror meshtastic packet-id generation: bottom 10 bits = rolling counter,
@@ -71,6 +75,11 @@
 -define(DEFAULT_NODE_ID, 1127302788).
 -define(INITIAL_PERIODIC_MS, 500).
 -define(PERIODIC_MS, 60000).
+
+%% Channel-access back-off (CSMA): re-enqueue a failed send at now + rand(0, window) ms,
+%% window doubling per attempt up to 250 bsl 4 = 4000 ms. Unbounded.
+-define(TX_BACKOFF_BASE_MS, 250).
+-define(TX_BACKOFF_MAX_SHIFT, 4).
 
 %%------------------------------------------------------------------------------
 %% Construction
@@ -331,14 +340,12 @@ next_packet_id(Rolling, Rand22) ->
 enqueue_tx(Payload, NotBefore, #core{tx_queue = Queue} = Core) ->
     Core#core{tx_queue = Queue ++ [#{payload => Payload, not_before => NotBefore}]}.
 
-%% Pop every intent due at `Now` (FIFO order preserved), returning their wire
-%% payloads and the state with those intents removed. Intents tagged `now` are
-%% always due; integer deadlines are due once `=< Now`.
--spec take_due(core_state(), integer()) -> {[binary()], core_state()}.
+%% Pop every due intent (FIFO), removing it from the queue. The caller sends each
+%% payload and feeds the result back via handle_tx_results/3.
+-spec take_due(core_state(), integer()) -> {[tx_intent()], core_state()}.
 take_due(#core{tx_queue = Queue} = Core, Now) ->
     {Due, Pending} = lists_partition(fun(Intent) -> is_due(Intent, Now) end, Queue),
-    Payloads = [Payload || #{payload := Payload} <- Due],
-    {Payloads, Core#core{tx_queue = Pending}}.
+    {Due, Core#core{tx_queue = Pending}}.
 
 is_due(#{not_before := now}, _Now) -> true;
 is_due(#{not_before := NotBefore}, Now) -> NotBefore =< Now.
@@ -351,6 +358,40 @@ next_wakeup(#core{tx_queue = Queue}, Now) ->
         [] -> infinity;
         Deadlines -> max(0, lists_min(Deadlines) - Now)
     end.
+
+%% Feed each pumped intent's result back: `ok` is a no-op (take_due dropped it),
+%% `{error, payload_too_large}` is a permanent drop, any other error is transient
+%% (re-enqueue with back-off, unbounded retry). The batch shares one `rand22`,
+%% decorrelated per intent by index+attempts so co-failing intents don't re-collide.
+-spec handle_tx_results([{tx_intent(), ok | {error, term()}}], env(), core_state()) ->
+    core_state().
+handle_tx_results(Results, Env, Core) ->
+    handle_tx_results(Results, Env, Core, 0).
+
+handle_tx_results([], _Env, Core, _Index) ->
+    Core;
+handle_tx_results([{_Intent, ok} | Rest], Env, Core, Index) ->
+    handle_tx_results(Rest, Env, Core, Index + 1);
+handle_tx_results([{_Intent, {error, payload_too_large}} | Rest], Env, Core, Index) ->
+    ?MESH_TRACE("[mesh] tx drop (payload_too_large) bytes=~p~n", [
+        byte_size(maps:get(payload, _Intent))
+    ]),
+    handle_tx_results(Rest, Env, Core, Index + 1);
+handle_tx_results(
+    [{Intent, {error, _Reason}} | Rest], Env, #core{tx_queue = Queue} = Core, Index
+) ->
+    #{now := Now, rand22 := Rand} = Env,
+    Attempts = maps:get(attempts, Intent, 0),
+    Seed = Rand bxor (Index bsl 16) bxor (Attempts bsl 8),
+    Backoff = backoff_ms(Attempts, Seed),
+    ?MESH_TRACE("[mesh] tx retry (~p) attempt=~p in ~pms~n", [_Reason, Attempts + 1, Backoff]),
+    Intent1 = Intent#{not_before => Now + Backoff, attempts => Attempts + 1},
+    handle_tx_results(Rest, Env, Core#core{tx_queue = Queue ++ [Intent1]}, Index + 1).
+
+-spec backoff_ms(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
+backoff_ms(Attempts, Rand) ->
+    Window = ?TX_BACKOFF_BASE_MS bsl min(Attempts, ?TX_BACKOFF_MAX_SHIFT),
+    Rand rem Window.
 
 %%------------------------------------------------------------------------------
 %% Dedup

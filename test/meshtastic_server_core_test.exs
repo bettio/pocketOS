@@ -61,10 +61,11 @@ defmodule MeshtasticServerCoreTest do
 
   defp env(extra \\ %{}), do: Map.merge(%{now: 1000, rand22: 0x2ABCDE}, extra)
 
-  # Drain everything currently queued for TX (all `:now` intents today).
+  # Drain the wire payloads currently due for TX. take_due/2 returns full
+  # tx_intent maps now, so pull each intent's payload for assertions.
   defp drain(core) do
-    {payloads, _core2} = :meshtastic_server_core.take_due(core, 1_000_000)
-    payloads
+    {intents, _core2} = :meshtastic_server_core.take_due(core, 1_000_000)
+    Enum.map(intents, & &1.payload)
   end
 
   defp decode_wire(wire) do
@@ -128,8 +129,8 @@ defmodule MeshtasticServerCoreTest do
   test "a duplicate is discarded with no tx and the dedup state is threaded" do
     packet = rx_packet(%{data: text_data("once")})
     {:ok, core1, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
-    # drain the first rebroadcast so it can't be confused with a second one
-    {[_rebroadcast], core1b} = :meshtastic_server_core.take_due(core1, 1_000_000)
+    # drain the first rebroadcast intent so it can't be confused with a second one
+    {[_intent], core1b} = :meshtastic_server_core.take_due(core1, 1_000_000)
 
     {:discard, core2, effects} =
       :meshtastic_server_core.handle_rx(packet, @attrs, env(%{now: 1001}), core1b)
@@ -431,8 +432,110 @@ defmodule MeshtasticServerCoreTest do
     {:ok, core2, []} =
       :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
 
-    {[_wire], core3} = :meshtastic_server_core.take_due(core2, 1_000_000)
+    {[_intent], core3} = :meshtastic_server_core.take_due(core2, 1_000_000)
     assert :meshtastic_server_core.next_wakeup(core3, 1_000_000) == :infinity
+  end
+
+  # ---- handle_tx_results: channel-access retry / back-off ----
+
+  test "a failed send is re-enqueued with a back-off deadline (unbounded retry)" do
+    now = 1_000
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+
+    {[intent], core3} = :meshtastic_server_core.take_due(core2, now)
+    assert Map.get(intent, :attempts, 0) == 0
+
+    core4 =
+      :meshtastic_server_core.handle_tx_results(
+        [{intent, {:error, :channel_busy}}],
+        env(%{now: now}),
+        core3
+      )
+
+    # not due yet -- it sits behind a future deadline inside the back-off window
+    assert {[], _} = :meshtastic_server_core.take_due(core4, now)
+    delay = :meshtastic_server_core.next_wakeup(core4, now)
+    assert delay >= 0 and delay < 250
+
+    # once the deadline passes it drains again: same bytes, attempts bumped
+    {[retried], _} = :meshtastic_server_core.take_due(core4, now + 250)
+    assert retried.payload == intent.payload
+    assert retried.attempts == 1
+  end
+
+  test "repeated channel-busy failures retry forever (never dropped), bumping attempts" do
+    now = 1_000
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+
+    core_final =
+      Enum.reduce(1..10, core2, fn _i, acc ->
+        {[intent], acc1} = :meshtastic_server_core.take_due(acc, 10_000_000)
+
+        :meshtastic_server_core.handle_tx_results(
+          [{intent, {:error, :channel_busy}}],
+          env(%{now: now}),
+          acc1
+        )
+      end)
+
+    # still queued after 10 consecutive failures, attempts kept climbing
+    {[intent], _} = :meshtastic_server_core.take_due(core_final, 10_000_000)
+    assert intent.attempts == 10
+  end
+
+  test "a payload_too_large result is dropped, not retried" do
+    now = 1_000
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+
+    {[intent], core3} = :meshtastic_server_core.take_due(core2, now)
+
+    core4 =
+      :meshtastic_server_core.handle_tx_results(
+        [{intent, {:error, :payload_too_large}}],
+        env(%{now: now}),
+        core3
+      )
+
+    assert drain(core4) == []
+    assert :meshtastic_server_core.next_wakeup(core4, now) == :infinity
+  end
+
+  test "an ok result consumes the intent (nothing re-enqueued)" do
+    now = 1_000
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+
+    {[intent], core3} = :meshtastic_server_core.take_due(core2, now)
+    core4 = :meshtastic_server_core.handle_tx_results([{intent, :ok}], env(%{now: now}), core3)
+    assert drain(core4) == []
+  end
+
+  test "intents failing together in one batch get decorrelated back-off deadlines" do
+    now = 1_000
+
+    {:ok, c1, []} = :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+    {:ok, c2, []} = :meshtastic_server_core.handle_send(@broadcast, text_data("b"), env(), c1)
+    {[i1, i2], c3} = :meshtastic_server_core.take_due(c2, now)
+
+    core4 =
+      :meshtastic_server_core.handle_tx_results(
+        [{i1, {:error, :channel_busy}}, {i2, {:error, :channel_busy}}],
+        env(%{now: now}),
+        c3
+      )
+
+    {intents, _} = :meshtastic_server_core.take_due(core4, now + 5_000)
+    deadlines = Enum.map(intents, & &1.not_before)
+    assert length(deadlines) == 2
+    # distinct deadlines -> the shared rand22 was decorrelated per intent
+    assert Enum.uniq(deadlines) == deadlines
   end
 
   # ---- pure primitives ----
