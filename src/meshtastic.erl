@@ -130,7 +130,7 @@ decrypt_pki(Packet, OurPriv, PeerPub) ->
 
 encrypt_pki(Packet, OurPriv, PeerPub) ->
     #{src := SrcAddr, packet_id := PktId, data := Data} = Packet,
-    ExtraNonce = binary:decode_unsigned(crypto:strong_rand_bytes(4), little),
+    ExtraNonce = decode_unsigned(crypto:strong_rand_bytes(4), little),
     Shared = crypto:compute_key(eddh, PeerPub, OurPriv, x25519),
     Key = crypto:hash(sha256, Shared),
     Nonce = <<PktId:32/little-unsigned, ExtraNonce:32/little-unsigned, SrcAddr:32/little-unsigned,
@@ -139,3 +139,21 @@ encrypt_pki(Packet, OurPriv, PeerPub) ->
     EncData = <<Ciphertext/binary, Tag/binary, ExtraNonce:32/little-unsigned>>,
     PktWithEnc = Packet#{encrypted_data => EncData},
     maps:remove(data, PktWithEnc).
+
+%% TODO: drop once AtomVM exposes binary:decode_unsigned/2.
+%% Pure-Erlang reimplementation of binary:decode_unsigned/2 (big and little
+%% endianness), folding one byte at a time so it stays AtomVM-compatible.
+decode_unsigned(Bin, big) ->
+    decode_unsigned_big(Bin, 0);
+decode_unsigned(Bin, little) ->
+    decode_unsigned_little(Bin, 0, 0).
+
+decode_unsigned_big(<<>>, Acc) ->
+    Acc;
+decode_unsigned_big(<<Byte, Rest/binary>>, Acc) ->
+    decode_unsigned_big(Rest, (Acc bsl 8) bor Byte).
+
+decode_unsigned_little(<<>>, _Shift, Acc) ->
+    Acc;
+decode_unsigned_little(<<Byte, Rest/binary>>, Shift, Acc) ->
+    decode_unsigned_little(Rest, Shift + 8, Acc bor (Byte bsl Shift)).
