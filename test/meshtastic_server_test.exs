@@ -50,6 +50,8 @@ defmodule MeshtasticServerTest do
       %{
         want_ack: false,
         dest: 4_294_967_295,
+        rssi: -28,
+        snr: 11,
         message: %{portnum: :TEXT_MESSAGE_APP, payload: <<"ciaone a tutti">>}
       },
       5000

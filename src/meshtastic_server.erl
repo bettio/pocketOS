@@ -76,7 +76,7 @@ init_channel(undefined) ->
 init_channel(#{name := Name, psk := Psk} = Channel) ->
     Channel#{hash => meshtastic:channel_hash(Name, Psk)}.
 
-handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, State) ->
+handle_call({handle_payload, {_IfaceId, _Pid}, Payload, Attributes}, _From, State) ->
     ThisNodeAddress = State#state.node_id,
     case meshtastic:parse(Payload) of
         {ok, #{src := ThisNodeAddress} = _Packet} ->
@@ -119,7 +119,9 @@ handle_call({handle_payload, {_IfaceId, _Pid}, Payload, _Attributes}, _From, Sta
                                     WantResponse = maps:get(want_response, Message, false),
                                     DecodedPacket = DecryptedPacket#{
                                         message => Message,
-                                        want_response => WantResponse
+                                        want_response => WantResponse,
+                                        rssi => maps:get(rssi, Attributes, undefined),
+                                        snr => maps:get(snr, Attributes, undefined)
                                     },
                                     maybe_callback(
                                         State#state.callbacks, message_cb, DecodedPacket

@@ -6,29 +6,37 @@ defmodule MeshtasticCallbacks do
     :micronesia.create_table(:meshtastic_message)
     :micronesia.create_table(:meshtastic_position)
     :micronesia.create_table(:meshtastic_node_info)
+    # TODO: future evolution: fold signal into the node record
+    :micronesia.create_table(:meshtastic_signal)
   end
 
-  def message_cb(%{
-        message: %{portnum: :TEXT_MESSAGE_APP, payload: payload},
-        packet_id: packet_id
-      }) do
+  def message_cb(
+        %{
+          message: %{portnum: :TEXT_MESSAGE_APP, payload: payload},
+          packet_id: packet_id
+        } = msg
+      ) do
+    pre_process(msg)
     MeshTrace.trace("Got text message: #{inspect(payload)}")
     :micronesia.dirty_write({:meshtastic_message, packet_id, payload})
   end
 
-  def message_cb(%{
-        message: %{
-          portnum: :POSITION_APP,
-          payload:
-            %{
-              time: _time,
-              latitude_i: lat,
-              longitude_i: lon,
-              altitude: alt
-            } = payload
-        },
-        src: src
-      }) do
+  def message_cb(
+        %{
+          message: %{
+            portnum: :POSITION_APP,
+            payload:
+              %{
+                time: _time,
+                latitude_i: lat,
+                longitude_i: lon,
+                altitude: alt
+              } = payload
+          },
+          src: src
+        } = msg
+      ) do
+    pre_process(msg)
     MeshTrace.trace("Got position message: #{inspect(payload)}")
 
     :micronesia.dirty_write(
@@ -36,13 +44,16 @@ defmodule MeshtasticCallbacks do
     )
   end
 
-  def message_cb(%{
-        message: %{
-          portnum: :NODEINFO_APP,
-          payload: payload
-        },
-        src: src
-      }) do
+  def message_cb(
+        %{
+          message: %{
+            portnum: :NODEINFO_APP,
+            payload: payload
+          },
+          src: src
+        } = msg
+      ) do
+    pre_process(msg)
     payload_with_updated = Map.put(payload, :updated_at, :erlang.system_time(:second))
 
     MeshTrace.trace("Got node info message: #{inspect(payload)}")
@@ -51,8 +62,18 @@ defmodule MeshtasticCallbacks do
   end
 
   def message_cb(msg) do
+    pre_process(msg)
     MeshTrace.trace("Got unexpected message: #{inspect(msg)}")
   end
+
+  defp pre_process(%{src: src, rssi: rssi, snr: snr})
+       when is_integer(rssi) and is_integer(snr) do
+    :micronesia.dirty_write(
+      {:meshtastic_signal, src, %{rssi: rssi, snr: snr, last_heard: :erlang.system_time(:second)}}
+    )
+  end
+
+  defp pre_process(_), do: :ok
 
   def peer_public_key(node_id) do
     case :micronesia.dirty_read({:meshtastic_node_info, node_id}) do

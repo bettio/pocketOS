@@ -108,6 +108,7 @@ defmodule UI.MeshNodes do
   def handle_event(:ui, :shown, ui, state) do
     :micronesia.subscribe({:table, :meshtastic_node_info, :simple})
     :micronesia.subscribe({:table, :meshtastic_position, :simple})
+    :micronesia.subscribe({:table, :meshtastic_signal, :simple})
 
     {updated_ui, new_state} = reload_model(ui, state)
 
@@ -171,7 +172,22 @@ defmodule UI.MeshNodes do
           []
       end
 
-    node_info_list ++ position_list
+    signal_list =
+      case :micronesia.dirty_read({:meshtastic_signal, node_id}) do
+        [{:meshtastic_signal, node_id, signal_map}] ->
+          Enum.map(signal_map, fn {key, value} ->
+            %{
+              id: key,
+              text: "#{key}: #{maybe_encode(key, value)}",
+              source: {:pocket_os, "icons/32/generic/info.rgba"}
+            }
+          end)
+
+        [] ->
+          []
+      end
+
+    node_info_list ++ position_list ++ signal_list
   end
 
   defp reload_list(ui, state) do
@@ -218,7 +234,25 @@ defmodule UI.MeshNodes do
     Base.encode16(value)
   end
 
+  defp maybe_encode(:last_heard, value) do
+    format_ago(value)
+  end
+
   defp maybe_encode(_key, value) do
     value
   end
+
+  defp format_ago(epoch) when is_integer(epoch) do
+    delta = :erlang.system_time(:second) - epoch
+
+    cond do
+      delta < 0 -> "0s ago"
+      delta < 60 -> "#{delta}s ago"
+      delta < 3600 -> "#{div(delta, 60)}m ago"
+      delta < 86_400 -> "#{div(delta, 3600)}h ago"
+      true -> "#{div(delta, 86_400)}d ago"
+    end
+  end
+
+  defp format_ago(_), do: "?"
 end
