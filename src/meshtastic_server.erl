@@ -62,7 +62,7 @@ handle_call(
 ) ->
     case meshtastic:parse(Payload) of
         {ok, Packet} ->
-            Env0 = #{now => erlang:monotonic_time(second), rand22 => rand22()},
+            Env0 = #{now_ms => erlang:monotonic_time(millisecond), rand22 => rand22()},
             Env = maybe_resolve_peer_key(Packet, Callbacks, Core0, Env0),
             {Reply, Core1, Effects} = meshtastic_server_core:handle_rx(
                 Packet, Attributes, Env, Core0
@@ -130,7 +130,7 @@ pump_tx(#state{radio = {_RadioId, RadioModule, Radio}, core = Core0} = State) ->
         end,
         DueIntents
     ),
-    Env = #{now => Now, rand22 => rand22()},
+    Env = #{now_ms => Now, rand22 => rand22()},
     Core2 = meshtastic_server_core:handle_tx_results(Results, Env, Core1),
     case meshtastic_server_core:next_wakeup(Core2, Now) of
         infinity -> ok;

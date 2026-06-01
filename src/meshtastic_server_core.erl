@@ -8,7 +8,7 @@
 %% decrypt, decode, ACK / NodeInfo replies, flood-rebroadcast decisions and
 %% packet-id generation. It is pure: it performs no I/O, reads no clock and
 %% draws no randomness. Everything impure is injected by the gen_server
-%% (`meshtastic_server`) as data through an `Env` map (`now`, `rand22`, a
+%% (`meshtastic_server`) as data through an `Env` map (`now_ms`, `rand22`, a
 %% pre-resolved PKI `peer_key`), and everything the core wants done flows back
 %% out as data: transmissions are appended to `tx_queue` in the returned state,
 %% and other side effects are returned as an `Effects` list the gen_server runs.
@@ -26,6 +26,8 @@
     take_due/2,
     handle_tx_results/3,
     next_wakeup/2,
+    rebroadcast_delay_ms/2,
+    cw_size/1,
     update_last_seen/4,
     prune_expired_last_seen/2
 ]).
@@ -48,23 +50,26 @@
     {deliver, DecodedPacket :: map()}
     | {set_timer, Ms :: non_neg_integer(), Msg :: term()}.
 
-%% - `now` is monotonic seconds (dedup window)
+%% - `now_ms` is the one injected clock: monotonic milliseconds, used for
+%% rebroadcast / back-off / tx-scheduling deadlines.
 %% - `rand22` is a fresh 22-bit value (top bits of an originated packet_id)
 %% - `peer_key` is present only when rx_needs_peer_key/2 told the gen_server to resolve
 %% it for a PKI packet addressed to us.
 -type env() :: #{
-    now => integer(),
+    now_ms => integer(),
     rand22 => non_neg_integer(),
     peer_key => {ok, binary()} | {error, term()}
 }.
 
-%% A queued transmission. `not_before` is `now` (send on the next pump) or an
-%% absolute monotonic-ms back-off deadline (a send the radio failed is re-enqueued
-%% with one). `attempts` sizes the back-off, never bounds retries.
+%% A queued transmission. `not_before` is `now` or an absolute monotonic-ms
+%% deadline (SNR-weighted rebroadcast delay, or back-off after a failed send).
+%% `attempts` sizes the back-off, never bounds retries; `ref` = {Src, PacketId}
+%% tags a relay so an overheard duplicate can cancel it.
 -type tx_intent() :: #{
     payload := binary(),
     not_before := now | integer(),
-    attempts => non_neg_integer()
+    attempts => non_neg_integer(),
+    ref => {non_neg_integer(), non_neg_integer()}
 }.
 
 -define(PACKET_SEEN_EXPIRY_SEC, 30).
@@ -80,6 +85,28 @@
 %% window doubling per attempt up to 250 bsl 4 = 4000 ms. Unbounded.
 -define(TX_BACKOFF_BASE_MS, 250).
 -define(TX_BACKOFF_MAX_SHIFT, 4).
+
+%% Defer each rebroadcast by `2*CWmax*slot + random(0, 2^CWsize)*slot`, where
+%% CWsize maps our reception SNR (?SNR_MIN..?SNR_MAX dB) onto [?CW_MIN, ?CW_MAX],
+%% so a weakly-heard (far) packet relays first -> range extension. We are role
+%% CLIENT, hence the non-router branch (with the 2*CWmax*slot floor).
+%%
+%% TODO: the constants below are HARDCODED for SF9/BW250 medium-fast config.
+%% They must be revisited whenever the modulation / preset changes.
+%% ?REBROADCAST_SLOT_MS especially: the slot is a function of
+%% SF/BW, so it changes with every preset. Eventually these should be computed
+%% from the active radio config instead of living here as literals.
+%%
+%% Slot = airtime of one CAD / back-off unit:
+%%   max(2.25, NUM_SYM_CAD+0.5) * 2^SF/BW + 7.6 ms
+%% Examples (BW250):
+%%   SF9  -> 2.5 * 2.048 + 7.6 ~= 13 ms
+%%   SF11 -> 2.5 * 8.192 + 7.6 ~= 28 ms
+-define(CW_MIN, 3).
+-define(CW_MAX, 8).
+-define(SNR_MIN, -20).
+-define(SNR_MAX, 10).
+-define(REBROADCAST_SLOT_MS, 13).
 
 %%------------------------------------------------------------------------------
 %% Construction
@@ -120,16 +147,18 @@ handle_rx(#{src := Src}, _Attributes, _Env, #core{node_id = Src} = Core) ->
     ?MESH_TRACE("[mesh] rx discard (from this node)~n", []),
     {discard, Core, []};
 handle_rx(#{src := Src, packet_id := PacketId} = Packet, Attributes, Env, Core) ->
-    Now = maps:get(now, Env),
-    {Duplicated, UpdatedLastSeen} = update_last_seen(Core#core.last_seen, Src, PacketId, Now),
-    PrunedLastSeen = prune_expired_last_seen(UpdatedLastSeen, Now),
+    NowSec = maps:get(now_ms, Env) div 1000,
+    {Duplicated, UpdatedLastSeen} = update_last_seen(Core#core.last_seen, Src, PacketId, NowSec),
+    PrunedLastSeen = prune_expired_last_seen(UpdatedLastSeen, NowSec),
     IsRecipient = is_recipient(Packet, Core),
     if
         not Duplicated andalso IsRecipient ->
             handle_recipient(Packet, Attributes, Env, PrunedLastSeen, Core);
         not Duplicated ->
             ?MESH_TRACE("[mesh] rx not-for-us, will forward src=~p pid=~p~n", [Src, PacketId]),
-            Core1 = enqueue_rebroadcast(Packet, Core#core{last_seen = PrunedLastSeen}),
+            Core1 = enqueue_rebroadcast(
+                Packet, Attributes, Env, Core#core{last_seen = PrunedLastSeen}
+            ),
             {ok, Core1, []};
         true ->
             ?MESH_TRACE("[mesh] rx duplicate src=~p pid=~p~n", [Src, PacketId]),
@@ -151,7 +180,7 @@ handle_recipient(Packet, Attributes, Env, PrunedLastSeen, Core) ->
                     },
                     Core1 = Core#core{last_seen = PrunedLastSeen},
                     Core2 = enqueue_replies(Packet, Message, Env, Core1),
-                    Core3 = enqueue_rebroadcast(Packet, Core2),
+                    Core3 = enqueue_rebroadcast(Packet, Attributes, Env, Core2),
                     {ok, Core3, [{deliver, DecodedPacket}]}
             catch
                 _:_ ->
@@ -242,14 +271,16 @@ ack_reply(_Packet, _Message, _Env, Core) ->
 %% next_hop cleared (we don't learn routes, so a directed packet falls back to
 %% flooding) and relay_node stamped to our last byte. Skipped for unicasts to
 %% us, exhausted hop limits, and packets directed at another named hop.
-enqueue_rebroadcast(#{dest := Dest} = _Packet, #core{node_id = Dest} = Core) ->
+enqueue_rebroadcast(#{dest := Dest} = _Packet, _Attributes, _Env, #core{node_id = Dest} = Core) ->
     ?MESH_TRACE("[mesh] rebroadcast skip (unicast-to-us)~n", []),
     Core;
-enqueue_rebroadcast(#{hop_limit := 0} = _Packet, Core) ->
+enqueue_rebroadcast(#{hop_limit := 0} = _Packet, _Attributes, _Env, Core) ->
     ?MESH_TRACE("[mesh] rebroadcast skip (hop=0)~n", []),
     Core;
 enqueue_rebroadcast(
-    #{hop_limit := HopLimit, next_hop := NextHop} = Packet,
+    #{hop_limit := HopLimit, next_hop := NextHop, src := Src, packet_id := PacketId} = Packet,
+    Attributes,
+    Env,
     #core{node_id = NodeId} = Core
 ) ->
     RelayByte = meshtastic:relay_node_byte(NodeId),
@@ -263,11 +294,17 @@ enqueue_rebroadcast(
                 next_hop := 0,
                 relay_node := RelayByte
             }),
+            Snr = maps:get(snr, Attributes, undefined),
+            Delay = rebroadcast_delay_ms(Snr, maps:get(rand22, Env)),
+            NotBefore = maps:get(now_ms, Env) + Delay,
             ?MESH_TRACE(
-                "[mesh] rebroadcast pid=~p hop=~p->~p relay=~p~n",
-                [maps:get(packet_id, Packet), HopLimit, HopLimit - 1, RelayByte]
+                "[mesh] rebroadcast pid=~p hop=~p->~p relay=~p snr=~p in ~pms~n",
+                [PacketId, HopLimit, HopLimit - 1, RelayByte, Snr, Delay]
             ),
-            enqueue_tx(RadioPayload, now, Core)
+            enqueue_intent(
+                #{payload => RadioPayload, not_before => NotBefore, ref => {Src, PacketId}},
+                Core
+            )
     end.
 
 %%------------------------------------------------------------------------------
@@ -337,8 +374,11 @@ next_packet_id(Rolling, Rand22) ->
 %% TX queue ADT (a plain FIFO list behind these accessors)
 %%------------------------------------------------------------------------------
 
-enqueue_tx(Payload, NotBefore, #core{tx_queue = Queue} = Core) ->
-    Core#core{tx_queue = Queue ++ [#{payload => Payload, not_before => NotBefore}]}.
+enqueue_tx(Payload, NotBefore, Core) ->
+    enqueue_intent(#{payload => Payload, not_before => NotBefore}, Core).
+
+enqueue_intent(Intent, #core{tx_queue = Queue} = Core) ->
+    Core#core{tx_queue = Queue ++ [Intent]}.
 
 %% Pop every due intent (FIFO), removing it from the queue. The caller sends each
 %% payload and feeds the result back via handle_tx_results/3.
@@ -380,7 +420,7 @@ handle_tx_results([{_Intent, {error, payload_too_large}} | Rest], Env, Core, Ind
 handle_tx_results(
     [{Intent, {error, _Reason}} | Rest], Env, #core{tx_queue = Queue} = Core, Index
 ) ->
-    #{now := Now, rand22 := Rand} = Env,
+    #{now_ms := Now, rand22 := Rand} = Env,
     Attempts = maps:get(attempts, Intent, 0),
     Seed = Rand bxor (Index bsl 16) bxor (Attempts bsl 8),
     Backoff = backoff_ms(Attempts, Seed),
@@ -392,6 +432,23 @@ handle_tx_results(
 backoff_ms(Attempts, Rand) ->
     Window = ?TX_BACKOFF_BASE_MS bsl min(Attempts, ?TX_BACKOFF_MAX_SHIFT),
     Rand rem Window.
+
+-spec rebroadcast_delay_ms(integer() | undefined, non_neg_integer()) -> non_neg_integer().
+rebroadcast_delay_ms(Snr, Rand) ->
+    CWsize = cw_size(Snr),
+    Offset = 2 * ?CW_MAX * ?REBROADCAST_SLOT_MS,
+    Window = 1 bsl CWsize,
+    Offset + (Rand rem Window) * ?REBROADCAST_SLOT_MS.
+
+-spec cw_size(integer() | undefined) -> non_neg_integer().
+cw_size(Snr) when is_integer(Snr) ->
+    clamp(?CW_MIN + (Snr - ?SNR_MIN) * (?CW_MAX - ?CW_MIN) div (?SNR_MAX - ?SNR_MIN), ?CW_MIN, ?CW_MAX);
+cw_size(_) ->
+    ?CW_MAX.
+
+clamp(V, Lo, _Hi) when V < Lo -> Lo;
+clamp(V, _Lo, Hi) when V > Hi -> Hi;
+clamp(V, _Lo, _Hi) -> V.
 
 %%------------------------------------------------------------------------------
 %% Dedup

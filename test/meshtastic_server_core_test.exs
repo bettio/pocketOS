@@ -59,7 +59,7 @@ defmodule MeshtasticServerCoreTest do
     packet
   end
 
-  defp env(extra \\ %{}), do: Map.merge(%{now: 1000, rand22: 0x2ABCDE}, extra)
+  defp env(extra \\ %{}), do: Map.merge(%{now_ms: 1000, rand22: 0x2ABCDE}, extra)
 
   # Drain the wire payloads currently due for TX. take_due/2 returns full
   # tx_intent maps now, so pull each intent's payload for assertions.
@@ -133,7 +133,7 @@ defmodule MeshtasticServerCoreTest do
     {[_intent], core1b} = :meshtastic_server_core.take_due(core1, 1_000_000)
 
     {:discard, core2, effects} =
-      :meshtastic_server_core.handle_rx(packet, @attrs, env(%{now: 1001}), core1b)
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(%{now_ms: 1001}), core1b)
 
     assert effects == []
     assert drain(core2) == []
@@ -450,7 +450,7 @@ defmodule MeshtasticServerCoreTest do
     core4 =
       :meshtastic_server_core.handle_tx_results(
         [{intent, {:error, :channel_busy}}],
-        env(%{now: now}),
+        env(%{now_ms: now}),
         core3
       )
 
@@ -477,7 +477,7 @@ defmodule MeshtasticServerCoreTest do
 
         :meshtastic_server_core.handle_tx_results(
           [{intent, {:error, :channel_busy}}],
-          env(%{now: now}),
+          env(%{now_ms: now}),
           acc1
         )
       end)
@@ -498,7 +498,7 @@ defmodule MeshtasticServerCoreTest do
     core4 =
       :meshtastic_server_core.handle_tx_results(
         [{intent, {:error, :payload_too_large}}],
-        env(%{now: now}),
+        env(%{now_ms: now}),
         core3
       )
 
@@ -513,7 +513,7 @@ defmodule MeshtasticServerCoreTest do
       :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
 
     {[intent], core3} = :meshtastic_server_core.take_due(core2, now)
-    core4 = :meshtastic_server_core.handle_tx_results([{intent, :ok}], env(%{now: now}), core3)
+    core4 = :meshtastic_server_core.handle_tx_results([{intent, :ok}], env(%{now_ms: now}), core3)
     assert drain(core4) == []
   end
 
@@ -527,7 +527,7 @@ defmodule MeshtasticServerCoreTest do
     core4 =
       :meshtastic_server_core.handle_tx_results(
         [{i1, {:error, :channel_busy}}, {i2, {:error, :channel_busy}}],
-        env(%{now: now}),
+        env(%{now_ms: now}),
         c3
       )
 
@@ -536,6 +536,60 @@ defmodule MeshtasticServerCoreTest do
     assert length(deadlines) == 2
     # distinct deadlines -> the shared rand22 was decorrelated per intent
     assert Enum.uniq(deadlines) == deadlines
+  end
+
+  # ---- rebroadcast: SNR-weighted contention delay ----
+
+  test "cw_size maps SNR onto the contention window and clamps out-of-range" do
+    # snr -20..10 maps linearly onto 3..8, then clamped to [3, 8]
+    assert :meshtastic_server_core.cw_size(-20) == 3
+    assert :meshtastic_server_core.cw_size(-15) == 3
+    assert :meshtastic_server_core.cw_size(0) == 6
+    assert :meshtastic_server_core.cw_size(10) == 8
+    assert :meshtastic_server_core.cw_size(100) == 8
+    assert :meshtastic_server_core.cw_size(-100) == 3
+    # no SNR -> treat as a close/strong reception -> longest window
+    assert :meshtastic_server_core.cw_size(:undefined) == 8
+  end
+
+  test "rebroadcast_delay_ms: 208 ms floor, and a weaker signal has a much shorter ceiling" do
+    # delay = 2*CWmax*slot + (rand rem 2^CWsize)*slot; offset = 2*8*13 = 208, slot = 13
+    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 0) == 208
+    assert :meshtastic_server_core.rebroadcast_delay_ms(10, 0) == 208
+    # far (snr -15, window 8): ceiling 208 + 7*13 = 299
+    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 7) == 299
+    # near (snr 10, window 256): ceiling 208 + 255*13 = 3523 -> far relays much sooner
+    assert :meshtastic_server_core.rebroadcast_delay_ms(10, 255) == 3523
+    # undefined SNR behaves like the strongest (longest) reception
+    assert :meshtastic_server_core.rebroadcast_delay_ms(:undefined, 123) ==
+             :meshtastic_server_core.rebroadcast_delay_ms(10, 123)
+  end
+
+  test "a recipient broadcast is rebroadcast deferred by the SNR delay, tagged with its origin" do
+    packet = rx_packet(%{data: text_data("flood")})
+    e = env(%{now_ms: 1000, rand22: 0})
+
+    {:ok, core2, _effects} =
+      :meshtastic_server_core.handle_rx(packet, %{rssi: -100, snr: -15}, e, core())
+
+    # rand22 = 0 -> delay == the 208 ms floor; deferred, not sent immediately
+    assert {[], _} = :meshtastic_server_core.take_due(core2, 1000)
+    assert :meshtastic_server_core.next_wakeup(core2, 1000) == 208
+    {[intent], _} = :meshtastic_server_core.take_due(core2, 1208)
+    assert intent.not_before == 1208
+    assert intent.ref == {@peer, @orig_pid}
+  end
+
+  test "a not-for-us forwarded packet is also deferred and tagged with its origin" do
+    packet = rx_packet(%{dest: 0x12345678})
+    e = env(%{now_ms: 5000, rand22: 0})
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_rx(packet, %{rssi: -90, snr: 0}, e, core())
+
+    {[intent], _} = :meshtastic_server_core.take_due(core2, 5208)
+    assert intent.not_before == 5208
+    assert intent.ref == {@peer, @orig_pid}
   end
 
   # ---- pure primitives ----
