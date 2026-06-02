@@ -559,6 +559,36 @@ defmodule MeshtasticServerCoreTest do
     assert :meshtastic.decrypt(p, psk()) |> Map.fetch!(:data) == text_data("a")
   end
 
+  test "handle_send with pki encrypts end-to-end and signals PKI on the wire (channel_hash 0)" do
+    {our_pub, our_priv} = :crypto.generate_key(:eddh, :x25519)
+    {peer_pub, peer_priv} = :crypto.generate_key(:eddh, :x25519)
+
+    c = core(node_id: @us, private_key: our_priv)
+    e = env(%{pki: true, peer_key: {:ok, peer_pub}})
+
+    {:ok, core2, []} = :meshtastic_server_core.handle_send(@peer, text_data("secret"), e, c)
+
+    assert [wire] = drain(core2)
+    {:ok, p} = :meshtastic.parse(wire)
+    assert p.dest == @peer
+    assert p.src == @us
+    assert p.channel_hash == 0
+    assert p.want_ack == false
+
+    {:ok, dec} = :meshtastic.decrypt_pki(p, peer_priv, our_pub)
+    assert :meshtastic_proto.decode(dec.data) == %{portnum: :TEXT_MESSAGE_APP, payload: "secret"}
+  end
+
+  test "handle_send without pki keeps the channel hash even for a unicast dest" do
+    {:ok, core2, []} = :meshtastic_server_core.handle_send(@peer, text_data("dm"), env(), core())
+
+    assert [wire] = drain(core2)
+    {:ok, p} = :meshtastic.parse(wire)
+    assert p.dest == @peer
+    assert p.channel_hash == channel_hash()
+    assert :meshtastic.decrypt(p, psk()) |> Map.fetch!(:data) == text_data("dm")
+  end
+
   # ---- handle_periodic ----
 
   test "handle_periodic broadcasts NodeInfo and re-arms the timer when user_info is set" do

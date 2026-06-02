@@ -216,6 +216,99 @@ defmodule MeshtasticServerTest do
     Process.unregister(:meshtastic_server_tester)
   end
 
+  test "send/4 with pki emits a PKI-encrypted unicast to the recipient" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+    {our_pub, our_priv} = :crypto.generate_key(:eddh, :x25519)
+    {peer_pub, peer_priv} = :crypto.generate_key(:eddh, :x25519)
+    :persistent_term.put({:test_peer_pub, peer}, peer_pub)
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "secret dm"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us,
+        private_key: our_priv
+      )
+
+    :ok = :meshtastic_server.send(server, peer, data, %{pki: true})
+
+    receive do
+      bin when is_binary(bin) ->
+        {:ok, p} = :meshtastic.parse(bin)
+        assert p.dest == peer
+        assert p.src == us
+        assert p.channel_hash == 0
+
+        {:ok, dec} = :meshtastic.decrypt_pki(p, peer_priv, our_pub)
+
+        assert :meshtastic_proto.decode(dec.data) ==
+                 %{portnum: :TEXT_MESSAGE_APP, payload: "secret dm"}
+    after
+      5000 -> flunk("PKI direct message was never transmitted")
+    end
+
+    :persistent_term.erase({:test_peer_pub, peer})
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "send/4 with pki refuses to transmit when the peer key is unknown" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    {_our_pub, our_priv} = :crypto.generate_key(:eddh, :x25519)
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "x"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: 0xDEADCAFE,
+        private_key: our_priv
+      )
+
+    assert {:error, _} = :meshtastic_server.send(server, 0xCCCCCCCC, data, %{pki: true})
+    refute_receive(_, 200)
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "send/4 with pki refuses to transmit when we hold no private key" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    peer = 0xAAAAAAAA
+    {peer_pub, _peer_priv} = :crypto.generate_key(:eddh, :x25519)
+    :persistent_term.put({:test_peer_pub, peer}, peer_pub)
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "x"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: 0xDEADCAFE
+      )
+
+    assert {:error, :no_private_key} = :meshtastic_server.send(server, peer, data, %{pki: true})
+    refute_receive(_, 200)
+
+    :persistent_term.erase({:test_peer_pub, peer})
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
   test "a busy channel is retried until it succeeds (message not lost, server survives)" do
     Process.register(self(), :meshtastic_server_tester)
 

@@ -109,6 +109,19 @@ defmodule MeshtasticCallbacks do
     :ok = result
   end
 
+  def send_direct_message(dest_node_id, text) do
+    MeshTrace.trace("[mesh] send_direct_message: dest=#{dest_node_id} #{inspect(text)}")
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: text}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    result = :meshtastic_server.send(:meshtastic_server, dest_node_id, data, %{pki: true})
+    MeshTrace.trace("[mesh] send_direct_message result: #{inspect(result)}")
+    result
+  end
+
   def send_position(%{lat: lat, lon: lon, alt: alt}) do
     MeshTrace.trace("[mesh] send_position: lat=#{lat} lon=#{lon} alt=#{alt}")
     time = :erlang.system_time(:second)

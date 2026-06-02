@@ -21,6 +21,7 @@
     handle_rx/4,
     handle_send/4,
     handle_periodic/2,
+    can_send_pki/1,
     rx_needs_peer_key/2,
     rx_route_dests/2,
     next_packet_id/2,
@@ -359,6 +360,9 @@ route_learn_effects(#{src := Src, relay_node := Relay}, Message) ->
 handle_send(Dest, Data, Env, Core) ->
     {ok, originate(Dest, Data, Env, Core), []}.
 
+-spec can_send_pki(core_state()) -> boolean().
+can_send_pki(#core{private_key = Priv}) -> Priv =/= undefined.
+
 -spec handle_periodic(env(), core_state()) -> {core_state(), [effect()]}.
 handle_periodic(Env, #core{node_info = #{user_info := _UserInfo}} = Core) ->
     ?MESH_TRACE("[mesh] periodic node_info broadcast~n", []),
@@ -387,15 +391,16 @@ next_hop_for(Dest, OurByte, Routes) ->
     end.
 
 %% Build a freshly-originated packet (new packet_id from the rolling counter +
-%% Env.rand22), encrypt with the channel PSK, serialize and enqueue for TX.
+%% Env.rand22), encrypt it (channel PSK, or PKI when Env asks for it), serialize
+%% and enqueue for TX.
 originate(Dest, Data, Env, #core{
     node_id = NodeId,
-    rolling_packet_id = Rolling,
-    channel = #{psk := Psk, hash := ChannelHash}
+    rolling_packet_id = Rolling
 } = Core) ->
     Rand22 = maps:get(rand22, Env),
     {PacketId, NextRolling} = next_packet_id(Rolling, Rand22),
     RelayByte = meshtastic:relay_node_byte(NodeId),
+    {ChannelHash, Encrypt} = tx_crypto(Dest, Env, Core),
     Packet = #{
         dest => Dest,
         src => NodeId,
@@ -409,13 +414,20 @@ originate(Dest, Data, Env, #core{
         relay_node => RelayByte,
         data => Data
     },
-    Encrypted = meshtastic:encrypt(Packet, Psk),
+    Encrypted = Encrypt(Packet),
     RadioPayload = meshtastic:serialize(Encrypted),
     ?MESH_TRACE(
         "[mesh] tx pid=~p dest=~p data_bytes=~p wire_bytes=~p~n",
         [PacketId, Dest, byte_size(Data), byte_size(RadioPayload)]
     ),
     enqueue_tx(RadioPayload, now, Core#core{rolling_packet_id = NextRolling}).
+
+tx_crypto(Dest, #{pki := true, peer_key := {ok, Pub}}, #core{private_key = Priv}) when
+    Priv =/= undefined, Dest =/= ?BROADCAST_ADDR
+->
+    {0, fun(Packet) -> meshtastic:encrypt_pki(Packet, Priv, Pub) end};
+tx_crypto(_Dest, _Env, #core{channel = #{psk := Psk, hash := Hash}}) ->
+    {Hash, fun(Packet) -> meshtastic:encrypt(Packet, Psk) end}.
 
 -spec next_packet_id(non_neg_integer(), non_neg_integer()) ->
     {non_neg_integer(), non_neg_integer()}.

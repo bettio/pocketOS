@@ -18,7 +18,8 @@
     start_link/2,
     start_link/3,
     handle_payload/4,
-    send/3
+    send/3,
+    send/4
 ]).
 
 -export([
@@ -46,7 +47,10 @@ handle_payload(Server, {_IfaceId, _Pid} = Iface, Payload, Attributes) ->
     gen_server:call(Server, {handle_payload, Iface, Payload, Attributes}).
 
 send(Server, DestAddr, Data) ->
-    gen_server:call(Server, {send, DestAddr, Data}).
+    send(Server, DestAddr, Data, #{}).
+
+send(Server, DestAddr, Data, Opts) ->
+    gen_server:call(Server, {send, DestAddr, Data, Opts}).
 
 init([Radio, MeshtasticOpts]) ->
     Callbacks = proplists:get_value(callbacks, MeshtasticOpts),
@@ -80,15 +84,20 @@ handle_call(
             {reply, next, State}
     end;
 handle_call(
-    {send, DestAddr, Data},
+    {send, DestAddr, Data, Opts},
     _From,
     #state{callbacks = Callbacks, core = Core0} = State
 ) ->
-    Env = #{rand22 => rand22(), routes => resolve_routes([DestAddr], Callbacks)},
-    {ok, Core1, Effects} = meshtastic_server_core:handle_send(DestAddr, Data, Env, Core0),
-    run_effects(Effects, Callbacks),
-    State1 = pump_tx(State#state{core = Core1}),
-    {reply, ok, State1};
+    case prepare_send_env(DestAddr, Opts, Callbacks, Core0) of
+        {ok, Env} ->
+            {ok, Core1, Effects} = meshtastic_server_core:handle_send(DestAddr, Data, Env, Core0),
+            run_effects(Effects, Callbacks),
+            State1 = pump_tx(State#state{core = Core1}),
+            {reply, ok, State1};
+        {error, _Reason} = Error ->
+            ?MESH_TRACE("[mesh] send aborted dest=~p reason=~p~n", [DestAddr, _Reason]),
+            {reply, Error, State}
+    end;
 handle_call(_Msg, _From, State) ->
     {reply, error, State}.
 
@@ -173,6 +182,28 @@ pre_resolve_peer_key(#{src := NodeId}, Callbacks) ->
     catch
         _:_ -> {error, peer_pubkey_lookup_failed}
     end.
+
+%%------------------------------------------------------------------------------
+%% Send env preparation
+%%------------------------------------------------------------------------------
+
+prepare_send_env(DestAddr, #{pki := true}, Callbacks, Core) ->
+    case meshtastic_server_core:can_send_pki(Core) of
+        false ->
+            {error, no_private_key};
+        true ->
+            case pre_resolve_peer_key(#{src => DestAddr}, Callbacks) of
+                {ok, _} = PeerKey ->
+                    {ok, (base_send_env(DestAddr, Callbacks))#{pki => true, peer_key => PeerKey}};
+                {error, _} = Error ->
+                    Error
+            end
+    end;
+prepare_send_env(DestAddr, _Opts, Callbacks, _Core) ->
+    {ok, base_send_env(DestAddr, Callbacks)}.
+
+base_send_env(DestAddr, Callbacks) ->
+    #{rand22 => rand22(), routes => resolve_routes([DestAddr], Callbacks)}.
 
 %%------------------------------------------------------------------------------
 %% Next-hop route resolution
