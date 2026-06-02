@@ -8,6 +8,7 @@ defmodule MeshtasticCallbacks do
     :micronesia.create_table(:meshtastic_node_info)
     # TODO: future evolution: fold signal into the node record
     :micronesia.create_table(:meshtastic_signal)
+    :micronesia.create_table(:meshtastic_route)
   end
 
   def message_cb(
@@ -80,6 +81,19 @@ defmodule MeshtasticCallbacks do
       [{_, _, %{public_key: <<pub::binary-32>>}}] -> {:ok, pub}
       _ -> {:error, :no_pubkey}
     end
+  end
+
+  def learn_route(node_id, next_hop) do
+    :micronesia.dirty_write({:meshtastic_route, node_id, next_hop})
+  end
+
+  def next_hop_routes(node_ids) do
+    Enum.reduce(node_ids, %{}, fn node_id, acc ->
+      case :micronesia.dirty_read({:meshtastic_route, node_id}) do
+        [{_, _, byte}] -> Map.put(acc, node_id, byte)
+        _ -> acc
+      end
+    end)
   end
 
   def send_text_message(text) do

@@ -63,7 +63,12 @@ handle_call(
     case meshtastic:parse(Payload) of
         {ok, Packet} ->
             Env0 = #{now_ms => erlang:monotonic_time(millisecond), rand22 => rand22()},
-            Env = maybe_resolve_peer_key(Packet, Callbacks, Core0, Env0),
+            Env1 = maybe_resolve_peer_key(Packet, Callbacks, Core0, Env0),
+            Env = Env1#{
+                routes => resolve_routes(
+                    meshtastic_server_core:rx_route_dests(Packet, Core0), Callbacks
+                )
+            },
             {Reply, Core1, Effects} = meshtastic_server_core:handle_rx(
                 Packet, Attributes, Env, Core0
             ),
@@ -79,7 +84,7 @@ handle_call(
     _From,
     #state{callbacks = Callbacks, core = Core0} = State
 ) ->
-    Env = #{rand22 => rand22()},
+    Env = #{rand22 => rand22(), routes => resolve_routes([DestAddr], Callbacks)},
     {ok, Core1, Effects} = meshtastic_server_core:handle_send(DestAddr, Data, Env, Core0),
     run_effects(Effects, Callbacks),
     State1 = pump_tx(State#state{core = Core1}),
@@ -91,7 +96,7 @@ handle_cast(_Msg, State) ->
     {reply, error, State}.
 
 handle_info(periodic, #state{callbacks = Callbacks, core = Core0} = State) ->
-    Env = #{rand22 => rand22()},
+    Env = #{rand22 => rand22(), routes => #{}},
     {Core1, Effects} = meshtastic_server_core:handle_periodic(Env, Core0),
     run_effects(Effects, Callbacks),
     State1 = pump_tx(State#state{core = Core1}),
@@ -110,6 +115,9 @@ run_effects([], _Callbacks) ->
 run_effects([{deliver, DecodedPacket} | Rest], Callbacks) ->
     deliver(Callbacks, DecodedPacket),
     run_effects(Rest, Callbacks);
+run_effects([{learn, NodeId, NextHop} | Rest], Callbacks) ->
+    learn_route(Callbacks, NodeId, NextHop),
+    run_effects(Rest, Callbacks);
 run_effects([{set_timer, Ms, Msg} | Rest], Callbacks) ->
     erlang:send_after(Ms, self(), Msg),
     run_effects(Rest, Callbacks).
@@ -118,6 +126,11 @@ deliver(undefined, _DecodedPacket) ->
     ok;
 deliver(Callbacks, DecodedPacket) ->
     Callbacks:message_cb(DecodedPacket).
+
+learn_route(undefined, _NodeId, _NextHop) ->
+    ok;
+learn_route(Callbacks, NodeId, NextHop) ->
+    Callbacks:learn_route(NodeId, NextHop).
 
 %% Drain due TX; the core re-enqueues failed sends with a back-off, then arm tx_pump.
 %% TODO: coalesce tx_pump timers; we arm one per deferred pump (harmless idempotent no-ops).
@@ -160,6 +173,17 @@ pre_resolve_peer_key(#{src := NodeId}, Callbacks) ->
     catch
         _:_ -> {error, peer_pubkey_lookup_failed}
     end.
+
+%%------------------------------------------------------------------------------
+%% Next-hop route resolution
+%%------------------------------------------------------------------------------
+
+resolve_routes([], _Callbacks) ->
+    #{};
+resolve_routes(_Dests, undefined) ->
+    #{};
+resolve_routes(Dests, Callbacks) ->
+    Callbacks:next_hop_routes(Dests).
 
 rand22() ->
     <<TopRand:22, _:10>> = crypto:strong_rand_bytes(4),

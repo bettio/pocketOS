@@ -366,6 +366,178 @@ defmodule MeshtasticServerCoreTest do
     assert p.encrypted_data == packet.encrypted_data
   end
 
+  # ---- next-hop routing ----
+
+  defp routing_ack_data(request_id) do
+    %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: request_id}
+    |> :meshtastic_proto.encode()
+    |> :erlang.iolist_to_binary()
+  end
+
+  test "rx_route_dests: a recipient (broadcast or to-us) asks for the source's route" do
+    bcast = rx_packet(%{dest: @broadcast})
+    to_us = rx_packet(%{dest: @us})
+    assert :meshtastic_server_core.rx_route_dests(bcast, core()) == [@peer]
+    assert :meshtastic_server_core.rx_route_dests(to_us, core()) == [@peer]
+  end
+
+  test "rx_route_dests: a packet naming us as next hop asks for the dest's route" do
+    our_byte = :meshtastic.relay_node_byte(@us)
+    packet = rx_packet(%{dest: 0x11112222, next_hop: our_byte})
+    assert :meshtastic_server_core.rx_route_dests(packet, core()) == [0x11112222]
+  end
+
+  test "rx_route_dests: a flood or a packet aimed at another node needs no route" do
+    assert :meshtastic_server_core.rx_route_dests(
+             rx_packet(%{dest: 0x11112222, next_hop: 0}),
+             core()
+           ) == []
+
+    assert :meshtastic_server_core.rx_route_dests(
+             rx_packet(%{dest: 0x11112222, next_hop: 0x77}),
+             core()
+           ) == []
+  end
+
+  test "rx_route_dests: an exhausted-hop packet naming us needs no relay route" do
+    our_byte = :meshtastic.relay_node_byte(@us)
+    packet = rx_packet(%{dest: 0x11112222, next_hop: our_byte, hop_limit: 0})
+    assert :meshtastic_server_core.rx_route_dests(packet, core()) == []
+  end
+
+  test "an incoming ACK emits a learn effect for its source via its relay byte" do
+    packet = rx_packet(%{dest: @us, relay_node: 0x42, data: routing_ack_data(0x99)})
+    {:ok, _core2, effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+    assert {:learn, @peer, 0x42} in effects
+  end
+
+  test "a PKI ACK to us learns a route from its relay byte (read off the parsed packet)" do
+    bob = 0xBBBBBBBB
+    {alice_pub, alice_priv} = :crypto.generate_key(:eddh, :x25519)
+    {bob_pub, bob_priv} = :crypto.generate_key(:eddh, :x25519)
+
+    wire =
+      %{
+        dest: bob,
+        src: @peer,
+        packet_id: 0x12345678,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: 0,
+        next_hop: 0,
+        relay_node: 0x42,
+        data: routing_ack_data(0x99)
+      }
+      |> :meshtastic.encrypt_pki(alice_priv, bob_pub)
+      |> :meshtastic.serialize()
+
+    {:ok, packet} = :meshtastic.parse(wire)
+    c = core(node_id: bob, private_key: bob_priv)
+
+    {:ok, _core2, effects} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(%{peer_key: {:ok, alice_pub}}), c)
+
+    assert {:learn, @peer, 0x42} in effects
+  end
+
+  test "a plain text recipient and an ACK without a relay byte emit no learn effect" do
+    text = rx_packet(%{dest: @us, data: text_data("hi")})
+    {:ok, _c1, e1} = :meshtastic_server_core.handle_rx(text, @attrs, env(), core())
+    refute Enum.any?(e1, &match?({:learn, _, _}, &1))
+
+    no_relay = rx_packet(%{dest: @us, relay_node: 0, data: routing_ack_data(0x99)})
+    {:ok, _c2, e2} = :meshtastic_server_core.handle_rx(no_relay, @attrs, env(), core())
+    refute Enum.any?(e2, &match?({:learn, _, _}, &1))
+  end
+
+  test "a duplicate ACK is discarded and does not re-learn" do
+    packet = rx_packet(%{dest: @us, relay_node: 0x42, data: routing_ack_data(0x99)})
+    {:ok, c1, e1} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+    assert {:learn, @peer, 0x42} in e1
+
+    {:discard, _c2, e2} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(%{now_ms: 1001}), c1)
+
+    assert e2 == []
+  end
+
+  test "handle_send to a node with a known route sets next_hop; unknown floods (0)" do
+    {:ok, known, []} =
+      :meshtastic_server_core.handle_send(
+        @peer,
+        text_data("dm"),
+        env(%{routes: %{@peer => 0x42}}),
+        core()
+      )
+
+    {p_known, _} = decode_wire(hd(drain(known)))
+    assert p_known.dest == @peer
+    assert p_known.next_hop == 0x42
+
+    {:ok, unknown, []} =
+      :meshtastic_server_core.handle_send(@peer, text_data("dm"), env(%{routes: %{}}), core())
+
+    {p_unknown, _} = decode_wire(hd(drain(unknown)))
+    assert p_unknown.next_hop == 0
+  end
+
+  test "handle_send loop-guards a route that points back at our own relay byte" do
+    our_byte = :meshtastic.relay_node_byte(@us)
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_send(
+        @peer,
+        text_data("dm"),
+        env(%{routes: %{@peer => our_byte}}),
+        core()
+      )
+
+    {p, _} = decode_wire(hd(drain(core2)))
+    assert p.next_hop == 0
+  end
+
+  test "a learned 0xFF next hop survives (peer id ending in 0x00)" do
+    dest = 0x11110000
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_send(
+        dest,
+        text_data("dm"),
+        env(%{routes: %{dest => 0xFF}}),
+        core()
+      )
+
+    {p, _} = decode_wire(hd(drain(core2)))
+    assert p.next_hop == 0xFF
+  end
+
+  test "a packet naming us as next hop is re-directed toward its dest from a known route" do
+    our_byte = :meshtastic.relay_node_byte(@us)
+    dest = 0x11112222
+    packet = rx_packet(%{dest: dest, next_hop: our_byte})
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(%{routes: %{dest => 0x55}}), core())
+
+    {:ok, p} = :meshtastic.parse(hd(drain(core2)))
+    assert p.next_hop == 0x55
+    assert p.relay_node == our_byte
+    assert p.hop_limit == 2
+  end
+
+  test "a flood stays a flood on relay even when we know a route to its dest" do
+    dest = 0x11112222
+    packet = rx_packet(%{dest: dest, next_hop: 0})
+
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(%{routes: %{dest => 0x55}}), core())
+
+    {:ok, p} = :meshtastic.parse(hd(drain(core2)))
+    assert p.next_hop == 0
+  end
+
   # ---- handle_send ----
 
   test "handle_send originates a packet with a deterministic id and advances the counter" do

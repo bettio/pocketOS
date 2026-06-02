@@ -22,6 +22,7 @@
     handle_send/4,
     handle_periodic/2,
     rx_needs_peer_key/2,
+    rx_route_dests/2,
     next_packet_id/2,
     take_due/2,
     handle_tx_results/3,
@@ -48,6 +49,7 @@
 
 -type effect() ::
     {deliver, DecodedPacket :: map()}
+    | {learn, NodeId :: non_neg_integer(), NextHop :: 0..255}
     | {set_timer, Ms :: non_neg_integer(), Msg :: term()}.
 
 %% - `now_ms` is the one injected clock: monotonic milliseconds, used for
@@ -181,7 +183,8 @@ handle_recipient(Packet, Attributes, Env, PrunedLastSeen, Core) ->
                     Core1 = Core#core{last_seen = PrunedLastSeen},
                     Core2 = enqueue_replies(Packet, Message, Env, Core1),
                     Core3 = enqueue_rebroadcast(Packet, Attributes, Env, Core2),
-                    {ok, Core3, [{deliver, DecodedPacket}]}
+                    LearnEffects = route_learn_effects(Packet, Message),
+                    {ok, Core3, [{deliver, DecodedPacket} | LearnEffects]}
             catch
                 _:_ ->
                     ?MESH_TRACE("[mesh] rx discard (protobuf decode failed): ~p~n", [Decrypted]),
@@ -224,6 +227,26 @@ is_recipient(#{dest := Dest}, #core{node_id = NodeId}) ->
         ?BROADCAST_ADDR -> true;
         _ -> false
     end.
+
+-spec rx_route_dests(map(), core_state()) -> [non_neg_integer()].
+rx_route_dests(
+    #{dest := Dest, src := Src, next_hop := NextHop, hop_limit := HopLimit} = Packet,
+    #core{node_id = NodeId} = Core
+) ->
+    ReplyDests =
+        case is_recipient(Packet, Core) of
+            true -> [Src];
+            false -> []
+        end,
+    RelayDests =
+        case
+            Dest =/= NodeId andalso HopLimit > 0 andalso
+                NextHop =:= meshtastic:relay_node_byte(NodeId)
+        of
+            true -> [Dest];
+            false -> []
+        end,
+    ReplyDests ++ RelayDests.
 
 %% At most one reply is produced: a NodeInfo want_response reply takes
 %% precedence over (and replaces) a ROUTING ACK.
@@ -268,9 +291,10 @@ ack_reply(_Packet, _Message, _Env, Core) ->
     Core.
 
 %% Rebroadcast the original (still-encrypted) packet with hop_limit decremented,
-%% next_hop cleared (we don't learn routes, so a directed packet falls back to
-%% flooding) and relay_node stamped to our last byte. Skipped for unicasts to
-%% us, exhausted hop limits, and packets directed at another named hop.
+%% relay_node stamped to our last byte, and next_hop re-derived: a flood stays a
+%% flood, while a packet that named us as the next hop is re-directed toward its
+%% dest from our learned routes (else falls back to flooding). Skipped for
+%% unicasts to us, exhausted hop limits, and packets directed at another named hop.
 enqueue_rebroadcast(#{dest := Dest} = _Packet, _Attributes, _Env, #core{node_id = Dest} = Core) ->
     ?MESH_TRACE("[mesh] rebroadcast skip (unicast-to-us)~n", []),
     Core;
@@ -278,7 +302,13 @@ enqueue_rebroadcast(#{hop_limit := 0} = _Packet, _Attributes, _Env, Core) ->
     ?MESH_TRACE("[mesh] rebroadcast skip (hop=0)~n", []),
     Core;
 enqueue_rebroadcast(
-    #{hop_limit := HopLimit, next_hop := NextHop, src := Src, packet_id := PacketId} = Packet,
+    #{
+        dest := Dest,
+        hop_limit := HopLimit,
+        next_hop := NextHop,
+        src := Src,
+        packet_id := PacketId
+    } = Packet,
     Attributes,
     Env,
     #core{node_id = NodeId} = Core
@@ -289,22 +319,35 @@ enqueue_rebroadcast(
             ?MESH_TRACE("[mesh] rebroadcast skip (next_hop=~p not us)~n", [NextHop]),
             Core;
         true ->
+            NewNextHop =
+                case NextHop of
+                    0 -> 0;
+                    _ -> next_hop_for(Dest, RelayByte, maps:get(routes, Env, #{}))
+                end,
             RadioPayload = meshtastic:serialize(Packet#{
                 hop_limit := HopLimit - 1,
-                next_hop := 0,
+                next_hop := NewNextHop,
                 relay_node := RelayByte
             }),
             Snr = maps:get(snr, Attributes, undefined),
             Delay = rebroadcast_delay_ms(Snr, maps:get(rand22, Env)),
             NotBefore = maps:get(now_ms, Env) + Delay,
             ?MESH_TRACE(
-                "[mesh] rebroadcast pid=~p hop=~p->~p relay=~p snr=~p in ~pms~n",
-                [PacketId, HopLimit, HopLimit - 1, RelayByte, Snr, Delay]
+                "[mesh] rebroadcast pid=~p hop=~p->~p next_hop=~p relay=~p snr=~p in ~pms~n",
+                [PacketId, HopLimit, HopLimit - 1, NewNextHop, RelayByte, Snr, Delay]
             ),
             enqueue_intent(
                 #{payload => RadioPayload, not_before => NotBefore, ref => {Src, PacketId}},
                 Core
             )
+    end.
+
+route_learn_effects(#{src := Src, relay_node := Relay}, Message) ->
+    IsAckOrReply =
+        maps:get(request_id, Message, 0) =/= 0 orelse maps:get(reply_id, Message, 0) =/= 0,
+    case IsAckOrReply andalso Relay =/= 0 of
+        true -> [{learn, Src, Relay}];
+        false -> []
     end.
 
 %%------------------------------------------------------------------------------
@@ -333,6 +376,16 @@ send_node_info(_Dest, _Extra, _Env, Core) ->
     ?MESH_TRACE("[mesh] node_info send skip (no user_info)~n", []),
     Core.
 
+-spec next_hop_for(non_neg_integer(), 0..255, map()) -> 0..255.
+next_hop_for(?BROADCAST_ADDR, _OurByte, _Routes) ->
+    0;
+next_hop_for(Dest, OurByte, Routes) ->
+    case maps:get(Dest, Routes, 0) of
+        0 -> 0;
+        OurByte -> 0;
+        Byte -> Byte
+    end.
+
 %% Build a freshly-originated packet (new packet_id from the rolling counter +
 %% Env.rand22), encrypt with the channel PSK, serialize and enqueue for TX.
 originate(Dest, Data, Env, #core{
@@ -342,6 +395,7 @@ originate(Dest, Data, Env, #core{
 } = Core) ->
     Rand22 = maps:get(rand22, Env),
     {PacketId, NextRolling} = next_packet_id(Rolling, Rand22),
+    RelayByte = meshtastic:relay_node_byte(NodeId),
     Packet = #{
         dest => Dest,
         src => NodeId,
@@ -351,8 +405,8 @@ originate(Dest, Data, Env, #core{
         want_ack => false,
         hop_limit => 3,
         channel_hash => ChannelHash,
-        next_hop => 0,
-        relay_node => meshtastic:relay_node_byte(NodeId),
+        next_hop => next_hop_for(Dest, RelayByte, maps:get(routes, Env, #{})),
+        relay_node => RelayByte,
         data => Data
     },
     Encrypted = meshtastic:encrypt(Packet, Psk),

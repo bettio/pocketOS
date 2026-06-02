@@ -14,6 +14,20 @@ defmodule MeshtasticServerTest do
         pub -> {:ok, pub}
       end
     end
+
+    def learn_route(node_id, next_hop) do
+      send(:meshtastic_server_tester, {:learned_route, node_id, next_hop})
+      :persistent_term.put({:test_route, node_id}, next_hop)
+    end
+
+    def next_hop_routes(node_ids) do
+      Enum.reduce(node_ids, %{}, fn id, acc ->
+        case :persistent_term.get({:test_route, id}, nil) do
+          nil -> acc
+          byte -> Map.put(acc, id, byte)
+        end
+      end)
+    end
   end
 
   defmodule TestRadio do
@@ -492,7 +506,8 @@ defmodule MeshtasticServerTest do
       end
 
     {:ok, p} = :meshtastic.parse(rebroadcast)
-    # next_hop cleared so the flood continues; relay_node still stamped to us
+    # we were the named next hop, so next_hop is re-derived toward the dest; with
+    # no route learned for it yet, that falls back to a flood (0). relay_node = us.
     assert p.next_hop == 0
     assert p.relay_node == our_byte
     assert p.hop_limit == 2
@@ -550,6 +565,71 @@ defmodule MeshtasticServerTest do
     end
 
     :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "an incoming ACK is learned as a route and a later send to that node is directed" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us
+      )
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    ack_data =
+      %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: 0x12345678}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    ack_wire =
+      %{
+        dest: us,
+        src: peer,
+        packet_id: 0x0BADF00D,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        next_hop: 0,
+        relay_node: 0x42,
+        data: ack_data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, ack_wire, %{rssi: -28, snr: 11})
+
+    assert_receive({:learned_route, ^peer, 0x42}, 5000)
+    assert_receive(%{src: ^peer, message: %{portnum: :ROUTING_APP}}, 5000)
+
+    send_data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "directed"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    :ok = :meshtastic_server.send(server, peer, send_data)
+
+    directed =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("expected a directed send")
+      end
+
+    {:ok, p} = :meshtastic.parse(directed)
+    assert p.dest == peer
+    assert p.next_hop == 0x42
+
+    :ok = :gen_server.stop(server)
+    :persistent_term.erase({:test_route, peer})
     Process.unregister(:meshtastic_server_tester)
   end
 end
