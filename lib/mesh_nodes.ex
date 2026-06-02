@@ -109,6 +109,7 @@ defmodule UI.MeshNodes do
     :micronesia.subscribe({:table, :meshtastic_node_info, :simple})
     :micronesia.subscribe({:table, :meshtastic_position, :simple})
     :micronesia.subscribe({:table, :meshtastic_signal, :simple})
+    :micronesia.subscribe({:table, :meshtastic_route, :simple})
 
     {updated_ui, new_state} = reload_model(ui, state)
 
@@ -187,7 +188,22 @@ defmodule UI.MeshNodes do
           []
       end
 
-    node_info_list ++ position_list ++ signal_list
+    route_list =
+      case :micronesia.dirty_read({:meshtastic_route, node_id}) do
+        [{:meshtastic_route, node_id, next_hop}] ->
+          [
+            %{
+              id: :next_hop,
+              text: "next_hop: #{next_hop_label(next_hop)}",
+              source: {:pocket_os, "icons/32/generic/info.rgba"}
+            }
+          ]
+
+        [] ->
+          []
+      end
+
+    node_info_list ++ position_list ++ signal_list ++ route_list
   end
 
   defp reload_list(ui, state) do
@@ -255,4 +271,20 @@ defmodule UI.MeshNodes do
   end
 
   defp format_ago(_), do: "?"
+
+  defp next_hop_label(next_hop) do
+    hex = "0x" <> Base.encode16(<<next_hop>>)
+
+    case nodes_with_relay_byte(next_hop) do
+      [%{short_name: short_name}] -> "#{hex} (#{short_name})"
+      _ -> hex
+    end
+  end
+
+  defp nodes_with_relay_byte(byte) do
+    Enum.reduce(:micronesia.all(:meshtastic_node_info), [], fn
+      {:meshtastic_node_info, node_id, payload}, acc ->
+        if :meshtastic.relay_node_byte(node_id) == byte, do: [payload | acc], else: acc
+    end)
+  end
 end
