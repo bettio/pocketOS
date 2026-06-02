@@ -62,6 +62,16 @@ defmodule MeshtasticCallbacks do
     :micronesia.dirty_write({:meshtastic_node_info, src, payload_with_updated})
   end
 
+  def message_cb(
+        %{
+          message: %{portnum: :TRACEROUTE_APP, payload: route},
+          src: src
+        } = msg
+      ) do
+    pre_process(msg)
+    MeshTrace.trace("Got traceroute from #{inspect(src)}: #{inspect(route)}")
+  end
+
   def message_cb(msg) do
     pre_process(msg)
     MeshTrace.trace("Got unexpected message: #{inspect(msg)}")

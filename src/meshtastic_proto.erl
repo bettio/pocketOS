@@ -18,11 +18,18 @@
         'POSITION_APP' => 3,
         'NODEINFO_APP' => 4,
         'ROUTING_APP' => 5,
-        'TELEMETRY_APP' => 67
+        'TELEMETRY_APP' => 67,
+        'TRACEROUTE_APP' => 70
     }}
 ).
 -define(ROUTING_SCHEMA, #{
     error_reason => {3, {enum, #{'NONE' => 0}}}
+}).
+-define(ROUTE_DISCOVERY_SCHEMA, #{
+    route => {1, {repeated, fixed32}},
+    snr_towards => {2, {repeated, int32}},
+    route_back => {3, {repeated, fixed32}},
+    snr_back => {4, {repeated, int32}}
 }).
 -define(POSITION_SCHEMA, #{
     time => {4, sfixed32},
@@ -95,6 +102,10 @@ decode(Data) ->
                         Telemetry
                 end,
             ParsedMain#{payload := NewPayload};
+        #{portnum := 'TRACEROUTE_APP'} ->
+            RouteSchema = aprotobuf_decoder:transform_schema(?ROUTE_DISCOVERY_SCHEMA),
+            Payload = maps:get(payload, ParsedMain, <<>>),
+            ParsedMain#{payload => aprotobuf_decoder:parse(Payload, RouteSchema)};
         Any ->
             Any
     end.
@@ -113,6 +124,10 @@ encode(Map) ->
             aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA);
         #{portnum := 'ROUTING_APP', payload := PayloadMap} ->
             Payload = aprotobuf_encoder:encode(PayloadMap, ?ROUTING_SCHEMA),
+            NewMap = Map#{payload := Payload},
+            aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA);
+        #{portnum := 'TRACEROUTE_APP', payload := PayloadMap} ->
+            Payload = aprotobuf_encoder:encode(PayloadMap, ?ROUTE_DISCOVERY_SCHEMA),
             NewMap = Map#{payload := Payload},
             aprotobuf_encoder:encode(NewMap, ?MAIN_SCHEMA)
     end.

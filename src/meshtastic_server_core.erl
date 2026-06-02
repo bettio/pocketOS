@@ -182,7 +182,7 @@ handle_recipient(Packet, Attributes, Env, PrunedLastSeen, Core) ->
                         snr => maps:get(snr, Attributes, undefined)
                     },
                     Core1 = Core#core{last_seen = PrunedLastSeen},
-                    Core2 = enqueue_replies(Packet, Message, Env, Core1),
+                    Core2 = enqueue_replies(Packet, Message, Attributes, Env, Core1),
                     Core3 = enqueue_rebroadcast(Packet, Attributes, Env, Core2),
                     LearnEffects = route_learn_effects(Packet, Message),
                     {ok, Core3, [{deliver, DecodedPacket} | LearnEffects]}
@@ -249,13 +249,43 @@ rx_route_dests(
         end,
     ReplyDests ++ RelayDests.
 
-%% At most one reply is produced: a NodeInfo want_response reply takes
-%% precedence over (and replaces) a ROUTING ACK.
-enqueue_replies(Packet, Message, Env, Core) ->
-    case node_info_reply(Packet, Message, Env, Core) of
-        {true, Core1} -> Core1;
-        {false, Core1} -> ack_reply(Packet, Message, Env, Core1)
+%% At most one reply is produced, in precedence order: a TRACEROUTE route_reply,
+%% then a NodeInfo want_response reply, else a ROUTING ACK. The first two carry
+%% `request_id` and so double as the implicit ACK, replacing the bare ACK.
+enqueue_replies(Packet, Message, Attributes, Env, Core) ->
+    case traceroute_reply(Packet, Message, Attributes, Env, Core) of
+        {true, Core1} ->
+            Core1;
+        {false, Core1} ->
+            case node_info_reply(Packet, Message, Env, Core1) of
+                {true, Core2} -> Core2;
+                {false, Core2} -> ack_reply(Packet, Message, Env, Core2)
+            end
     end.
+
+traceroute_reply(
+    #{src := Src, dest := Dest, packet_id := OrigPid},
+    #{portnum := 'TRACEROUTE_APP', want_response := true} = Message,
+    Attributes,
+    Env,
+    #core{node_id = Dest} = Core
+) when Dest =/= ?BROADCAST_ADDR ->
+    Route = maps:get(payload, Message, #{}),
+    Existing = maps:get(snr_towards, Route, []),
+    SnrVal = snr_byte(maps:get(snr, Attributes, undefined)),
+    Data = #{
+        portnum => 'TRACEROUTE_APP',
+        payload => Route#{snr_towards => Existing ++ [SnrVal]},
+        request_id => OrigPid
+    },
+    Bin = erlang:iolist_to_binary(meshtastic_proto:encode(Data)),
+    ?MESH_TRACE("[mesh] traceroute reply -> src=~p req=~p snr=~p~n", [Src, OrigPid, SnrVal]),
+    {true, originate(Src, Bin, Env, Core)};
+traceroute_reply(_Packet, _Message, _Attributes, _Env, Core) ->
+    {false, Core}.
+
+snr_byte(undefined) -> -128;
+snr_byte(Snr) -> clamp(trunc(Snr * 4), -127, 127).
 
 node_info_reply(
     #{src := Src, packet_id := OrigPid},

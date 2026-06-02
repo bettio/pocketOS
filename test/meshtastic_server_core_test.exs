@@ -318,6 +318,90 @@ defmodule MeshtasticServerCoreTest do
     assert msg.portnum == :NODEINFO_APP
   end
 
+  # ---- handle_rx: TRACEROUTE want_response auto-reply ----
+
+  defp traceroute_data(payload, opts) do
+    %{portnum: :TRACEROUTE_APP, payload: payload}
+    |> Map.merge(Map.new(opts))
+    |> :meshtastic_proto.encode()
+    |> :erlang.iolist_to_binary()
+  end
+
+  @traceroute_request <<0x08, 0x46, 0x18, 0x01>>
+
+  test "a unicast traceroute request to us gets a route_reply with our snr appended" do
+    packet = rx_packet(%{dest: @us, data: @traceroute_request})
+
+    {:ok, core2, [{:deliver, decoded}]} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert decoded.message.portnum == :TRACEROUTE_APP
+
+    assert [reply] = drain(core2)
+    {p, msg} = decode_wire(reply)
+    assert p.dest == @peer
+    assert p.src == @us
+    assert msg.portnum == :TRACEROUTE_APP
+    assert msg.request_id == @orig_pid
+    assert msg.payload.snr_towards == [44]
+    refute Map.has_key?(msg.payload, :route)
+  end
+
+  test "an unknown rx snr is encoded as the INT8_MIN sentinel in the reply" do
+    packet = rx_packet(%{dest: @us, data: @traceroute_request})
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, %{rssi: -50}, env(), core())
+
+    assert [reply] = drain(core2)
+    {_p, msg} = decode_wire(reply)
+    assert msg.payload.snr_towards == [-128]
+  end
+
+  test "a multi-hop traceroute reply preserves the inbound route and appends our snr" do
+    data = traceroute_data(%{route: [0xA, 0xB], snr_towards: [20, -8]}, want_response: true)
+    packet = rx_packet(%{dest: @us, data: data})
+
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [reply] = drain(core2)
+    {_p, msg} = decode_wire(reply)
+    assert msg.payload.route == [0xA, 0xB]
+    assert msg.payload.snr_towards == [20, -8, 44]
+  end
+
+  test "a traceroute reply takes precedence over the ROUTING ack" do
+    packet =
+      rx_packet(%{dest: @us, want_ack: true, data: traceroute_data(%{}, want_response: true)})
+
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [reply] = drain(core2)
+    {p, msg} = decode_wire(reply)
+    assert p.dest == @peer
+    assert msg.portnum == :TRACEROUTE_APP
+    assert msg.request_id == @orig_pid
+  end
+
+  test "a broadcast traceroute request is flooded but not replied to" do
+    packet = rx_packet(%{dest: @broadcast, data: traceroute_data(%{}, want_response: true)})
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [rebroadcast] = drain(core2)
+    {:ok, p} = :meshtastic.parse(rebroadcast)
+    assert p.packet_id == @orig_pid
+    assert p.hop_limit == 2
+  end
+
+  test "a traceroute response to us is neither replied to nor acked" do
+    data =
+      %{portnum: :TRACEROUTE_APP, payload: %{snr_towards: [10]}, request_id: 0x99}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    packet = rx_packet(%{dest: @us, want_ack: true, data: data})
+    {:ok, core2, _effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+    assert drain(core2) == []
+  end
+
   # ---- handle_rx: rebroadcast rules ----
 
   test "a flood is rebroadcast with hop decremented, next_hop cleared, relay stamped" do
