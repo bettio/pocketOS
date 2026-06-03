@@ -9,6 +9,7 @@ defmodule MeshtasticCallbacks do
     # TODO: future evolution: fold signal into the node record
     :micronesia.create_table(:meshtastic_signal)
     :micronesia.create_table(:meshtastic_route)
+    :micronesia.create_table(:meshtastic_traceroute)
   end
 
   def message_cb(
@@ -60,6 +61,26 @@ defmodule MeshtasticCallbacks do
     MeshTrace.trace("Got node info message: #{inspect(payload)}")
 
     :micronesia.dirty_write({:meshtastic_node_info, src, payload_with_updated})
+  end
+
+  def message_cb(
+        %{
+          message: %{portnum: :TRACEROUTE_APP, payload: route, request_id: request_id},
+          src: src
+        } = msg
+      )
+      when is_integer(request_id) and request_id != 0 do
+    pre_process(msg)
+    MeshTrace.trace("Got traceroute reply from #{inspect(src)}: #{inspect(route)}")
+
+    report =
+      Map.merge(route, %{
+        reply_rssi: Map.get(msg, :rssi),
+        reply_snr: Map.get(msg, :snr),
+        received_at: :erlang.system_time(:second)
+      })
+
+    :micronesia.dirty_write({:meshtastic_traceroute, src, report})
   end
 
   def message_cb(
@@ -129,6 +150,19 @@ defmodule MeshtasticCallbacks do
 
     result = :meshtastic_server.send(:meshtastic_server, dest_node_id, data, %{pki: true})
     MeshTrace.trace("[mesh] send_direct_message result: #{inspect(result)}")
+    result
+  end
+
+  def send_traceroute(dest_node_id) do
+    MeshTrace.trace("[mesh] send_traceroute: dest=#{dest_node_id}")
+
+    data =
+      %{portnum: :TRACEROUTE_APP, payload: %{}, want_response: true}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    result = :meshtastic_server.send(:meshtastic_server, dest_node_id, data)
+    MeshTrace.trace("[mesh] send_traceroute result: #{inspect(result)}")
     result
   end
 

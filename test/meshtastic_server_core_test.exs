@@ -422,6 +422,69 @@ defmodule MeshtasticServerCoreTest do
     assert drain(core2) == []
   end
 
+  # ---- handle_send: TRACEROUTE initiator (the Traceroute app's send path) ----
+
+  defp traceroute_request_data do
+    %{portnum: :TRACEROUTE_APP, payload: %{}, want_response: true}
+    |> :meshtastic_proto.encode()
+    |> :erlang.iolist_to_binary()
+  end
+
+  test "handle_send originates a TRACEROUTE_APP unicast carrying want_response" do
+    {:ok, core2, []} =
+      :meshtastic_server_core.handle_send(@peer, traceroute_request_data(), env(), core())
+
+    assert [wire] = drain(core2)
+    {p, msg} = decode_wire(wire)
+    assert p.dest == @peer
+    assert p.src == @us
+    assert msg.portnum == :TRACEROUTE_APP
+    assert msg.want_response == true
+  end
+
+  test "the request we originate is responder-compatible (yields a route_reply)" do
+    packet = rx_packet(%{dest: @us, data: traceroute_request_data()})
+
+    {:ok, core2, [{:deliver, decoded} | _]} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert decoded.message.portnum == :TRACEROUTE_APP
+    assert decoded.message.want_response == true
+
+    assert [reply] = drain(core2)
+    {p, msg} = decode_wire(reply)
+    assert p.dest == @peer
+    assert msg.portnum == :TRACEROUTE_APP
+    assert msg.request_id == @orig_pid
+    assert msg.payload.snr_towards == [44]
+  end
+
+  test "a traceroute reply to us is delivered with route + request_id for the report" do
+    data =
+      %{
+        portnum: :TRACEROUTE_APP,
+        payload: %{route: [0xA, 0xB], snr_towards: [20, -8, 44]},
+        request_id: @orig_pid
+      }
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    packet = rx_packet(%{dest: @us, src: @peer, data: data})
+    {:ok, _core2, effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert {:deliver, decoded} =
+             Enum.find(effects, fn
+               {:deliver, _} -> true
+               _ -> false
+             end)
+
+    assert decoded.src == @peer
+    assert decoded.message.portnum == :TRACEROUTE_APP
+    assert decoded.message.request_id == @orig_pid
+    assert decoded.message.payload.route == [0xA, 0xB]
+    assert decoded.message.payload.snr_towards == [20, -8, 44]
+  end
+
   # ---- handle_rx: TRACEROUTE relay annotation ----
 
   test "a transiting traceroute request is annotated with our id and snr before relay" do

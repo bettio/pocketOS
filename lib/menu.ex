@@ -108,6 +108,12 @@ defmodule UI.Menu do
       args: []
     },
     %{
+      source: {:pocket_os, "icons/apps/radio.rgba"},
+      text: "Traceroute",
+      app: UI.Traceroute,
+      args: []
+    },
+    %{
       source: {:pocket_os, "icons/apps/map.rgba"},
       text: "Map",
       app: UI.Map,
