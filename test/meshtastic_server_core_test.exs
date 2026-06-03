@@ -900,6 +900,74 @@ defmodule MeshtasticServerCoreTest do
     assert :meshtastic_server_core.next_wakeup(core3, 1_000_000) == :infinity
   end
 
+  # ---- take_one_due / has_due (one-at-a-time pump primitives) ----
+
+  test "take_one_due on an empty queue returns :none" do
+    assert {:none, _} = :meshtastic_server_core.take_one_due(core(), 1000)
+  end
+
+  test "take_one_due pops a single immediate intent and removes it" do
+    {:ok, c, []} = :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+    assert {%{payload: _}, c2} = :meshtastic_server_core.take_one_due(c, 1000)
+    assert {:none, _} = :meshtastic_server_core.take_one_due(c2, 1000)
+  end
+
+  test "take_one_due drains immediates in FIFO order, matching take_due" do
+    {:ok, c1, []} = :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+    {:ok, c2, []} = :meshtastic_server_core.handle_send(@broadcast, text_data("b"), env(), c1)
+
+    {[ia, ib], _} = :meshtastic_server_core.take_due(c2, 1000)
+
+    {%{} = i1, c3} = :meshtastic_server_core.take_one_due(c2, 1000)
+    {%{} = i2, c4} = :meshtastic_server_core.take_one_due(c3, 1000)
+    assert i1.payload == ia.payload
+    assert i2.payload == ib.payload
+    assert {:none, _} = :meshtastic_server_core.take_one_due(c4, 1000)
+  end
+
+  test "take_one_due returns a later due intent, leaving an earlier not-yet-due one queued" do
+    # queue head is a deferred rebroadcast (not_before 1208); an immediate own-send follows
+    packet = rx_packet(%{data: text_data("flood")})
+
+    {:ok, c1, _} =
+      :meshtastic_server_core.handle_rx(
+        packet,
+        %{rssi: -100, snr: -15},
+        env(%{now_ms: 1000, rand22: 0}),
+        core()
+      )
+
+    {:ok, c2, []} =
+      :meshtastic_server_core.handle_send(@broadcast, text_data("now"), env(%{now_ms: 1000}), c1)
+
+    {%{} = first, c3} = :meshtastic_server_core.take_one_due(c2, 1000)
+    assert first.not_before == :now
+    refute :meshtastic_server_core.has_due(c3, 1000)
+    assert :meshtastic_server_core.has_due(c3, 1208)
+    {%{} = second, _} = :meshtastic_server_core.take_one_due(c3, 1208)
+    assert second.not_before == 1208
+  end
+
+  test "has_due reflects whether any intent is due at the given time" do
+    refute :meshtastic_server_core.has_due(core(), 1000)
+
+    {:ok, c, []} = :meshtastic_server_core.handle_send(@broadcast, text_data("a"), env(), core())
+    assert :meshtastic_server_core.has_due(c, 1000)
+
+    packet = rx_packet(%{data: text_data("flood")})
+
+    {:ok, c2, _} =
+      :meshtastic_server_core.handle_rx(
+        packet,
+        %{rssi: -100, snr: -15},
+        env(%{now_ms: 1000, rand22: 0}),
+        core()
+      )
+
+    refute :meshtastic_server_core.has_due(c2, 1000)
+    assert :meshtastic_server_core.has_due(c2, 1208)
+  end
+
   # ---- handle_tx_results: channel-access retry / back-off ----
 
   test "a failed send is re-enqueued with a back-off deadline (unbounded retry)" do

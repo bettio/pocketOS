@@ -26,6 +26,8 @@
     rx_route_dests/2,
     next_packet_id/2,
     take_due/2,
+    take_one_due/2,
+    has_due/2,
     handle_tx_results/3,
     next_wakeup/2,
     rebroadcast_delay_ms/2,
@@ -595,6 +597,33 @@ take_due(#core{tx_queue = Queue} = Core, Now) ->
 
 is_due(#{not_before := now}, _Now) -> true;
 is_due(#{not_before := NotBefore}, Now) -> NotBefore =< Now.
+
+-spec take_one_due(core_state(), integer()) ->
+    {tx_intent(), core_state()} | {none, core_state()}.
+take_one_due(#core{tx_queue = Queue} = Core, Now) ->
+    case take_one_due(Queue, Now, []) of
+        none -> {none, Core};
+        {Intent, Rest} -> {Intent, Core#core{tx_queue = Rest}}
+    end.
+
+take_one_due([], _Now, _Skipped) ->
+    none;
+take_one_due([Intent | Tail], Now, Skipped) ->
+    case is_due(Intent, Now) of
+        true -> {Intent, lists:reverse(Skipped) ++ Tail};
+        false -> take_one_due(Tail, Now, [Intent | Skipped])
+    end.
+
+-spec has_due(core_state(), integer()) -> boolean().
+has_due(#core{tx_queue = Queue}, Now) ->
+    has_due_list(Queue, Now).
+
+has_due_list([], _Now) -> false;
+has_due_list([Intent | Tail], Now) ->
+    case is_due(Intent, Now) of
+        true -> true;
+        false -> has_due_list(Tail, Now)
+    end.
 
 %% Delay (ms) until the earliest not-yet-due intent, or `infinity` if none.
 %% Call after take_due/2 has drained the due intents.

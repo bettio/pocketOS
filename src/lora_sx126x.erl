@@ -44,6 +44,8 @@
 -define(AGC_RESET_INTERVAL_MS, 60000).
 %% 10 seconds in 15.625us ticks - safe for all SF/BW combos
 -define(TX_HW_TIMEOUT, 640000).
+%% broadcast/2 call timeout: must exceed the 9000 ms waiting_tx_done state_timeout
+-define(TX_CALL_TIMEOUT_MS, 30000).
 
 %%
 %% Lora Provider API
@@ -63,7 +65,7 @@ stop(Lora) ->
 
 %% @hidden
 broadcast(Lora, Message) ->
-    gen_statem:call(Lora, {broadcast, Message}).
+    gen_statem:call(Lora, {broadcast, Message}, ?TX_CALL_TIMEOUT_MS).
 
 %% @hidden
 sleep(Lora) ->
@@ -187,9 +189,9 @@ waiting_tx_done(info, {gpio_interrupt, Pin}, #state{irq = Pin} = State) ->
     end,
     NewState = State#state{pending = undefined},
     {next_state, waiting_to_receive, NewState, [{reply, State#state.pending, ok}]};
-waiting_tx_done(info, agc_reset, _State) ->
+waiting_tx_done(info, agc_reset, State) ->
     erlang:send_after(?AGC_RESET_INTERVAL_MS, self(), agc_reset),
-    {keep_state_and_data, []};
+    {next_state, waiting_tx_done, State};
 waiting_tx_done(state_timeout, ErrorMessage, State) ->
     ?TRACE("Timed out waiting for tx_done IRQ.  Error message: ~p~n", [ErrorMessage]),
     set_recv_mode(State#state.spi, State#state.config),

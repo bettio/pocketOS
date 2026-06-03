@@ -66,6 +66,20 @@ defmodule MeshtasticServerTest do
     end
   end
 
+  # Next transmitted packet matching `pred`, skipping others (the 500 ms initial
+  # periodic NodeInfo interleaves with replies/rebroadcasts).
+  defp recv_packet(_pred, 0), do: flunk("expected a matching transmitted packet")
+
+  defp recv_packet(pred, tries) when tries > 0 do
+    receive do
+      bin when is_binary(bin) ->
+        {:ok, p} = :meshtastic.parse(bin)
+        if pred.(p), do: p, else: recv_packet(pred, tries - 1)
+    after
+      5000 -> flunk("no transmitted packet within 5s")
+    end
+  end
+
   test "handle a text message" do
     Process.register(self(), :meshtastic_server_tester)
 
@@ -427,6 +441,77 @@ defmodule MeshtasticServerTest do
     assert reply_msg.request_id == orig_pid
     assert reply_msg.payload.long_name == "pocketOS test"
     assert reply_msg.payload.short_name == "dc"
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "a broadcast NodeInfo want_response drains reply then rebroadcast one at a time" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+    orig_pid = 0x11223344
+
+    our_user_info = %{
+      id: "!deadcafe",
+      long_name: "pocketOS test",
+      short_name: "dc",
+      hw_model: 50,
+      role: :CLIENT,
+      is_licensed: false,
+      macaddr: <<0xDE, 0xAD, 0xCA, 0xFE, 0x00, 0x01>>,
+      public_key: :binary.copy(<<0>>, 32)
+    }
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us,
+        node_info: %{user_info: our_user_info}
+      )
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    # a broadcast NodeInfo want_response is BOTH a recipient (reply) AND floodable
+    req_data =
+      %{
+        portnum: :NODEINFO_APP,
+        payload: %{id: "!aaaaaaaa", long_name: "peer", short_name: "pe", hw_model: 50},
+        want_response: true
+      }
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    wire =
+      %{
+        dest: 0xFFFFFFFF,
+        src: peer,
+        packet_id: orig_pid,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        next_hop: 0,
+        relay_node: 0,
+        data: req_data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, wire, %{rssi: -28, snr: 11})
+
+    assert_receive(%{src: ^peer, message: %{portnum: :NODEINFO_APP}}, 5000)
+
+    reply = recv_packet(fn p -> p.src == us and p.dest == peer end, 6)
+    assert reply.src == us
+
+    fwd = recv_packet(fn p -> p.src == peer and p.packet_id == orig_pid end, 6)
+    assert fwd.hop_limit == 2
+
+    assert Process.alive?(server)
 
     :ok = :gen_server.stop(server)
     Process.unregister(:meshtastic_server_tester)

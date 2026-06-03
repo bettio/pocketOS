@@ -141,24 +141,34 @@ learn_route(undefined, _NodeId, _NextHop) ->
 learn_route(Callbacks, NodeId, NextHop) ->
     Callbacks:learn_route(NodeId, NextHop).
 
-%% Drain due TX; the core re-enqueues failed sends with a back-off, then arm tx_pump.
-%% TODO: coalesce tx_pump timers; we arm one per deferred pump (harmless idempotent no-ops).
+%% Send at most ONE due intent per call, then re-arm tx_pump and return to the
+%% loop so RX interleaves between TXs; the core re-enqueues failed sends with a
+%% back-off.
 pump_tx(#state{radio = {_RadioId, RadioModule, Radio}, core = Core0} = State) ->
     Now = erlang:monotonic_time(millisecond),
-    {DueIntents, Core1} = meshtastic_server_core:take_due(Core0, Now),
-    Results = lists:map(
-        fun(#{payload := Payload} = Intent) ->
-            {Intent, RadioModule:broadcast(Radio, Payload)}
+    case meshtastic_server_core:take_one_due(Core0, Now) of
+        {none, Core1} ->
+            arm_tx_pump(Core1, Now),
+            State#state{core = Core1};
+        {#{payload := Payload} = Intent, Core1} ->
+            Result = RadioModule:broadcast(Radio, Payload),
+            NowAfter = erlang:monotonic_time(millisecond),
+            Env = #{now_ms => NowAfter, rand22 => rand22()},
+            Core2 = meshtastic_server_core:handle_tx_results([{Intent, Result}], Env, Core1),
+            arm_tx_pump(Core2, NowAfter),
+            State#state{core = Core2}
+    end.
+
+arm_tx_pump(Core, Now) ->
+    Delay =
+        case meshtastic_server_core:has_due(Core, Now) of
+            true -> 0;
+            false -> meshtastic_server_core:next_wakeup(Core, Now)
         end,
-        DueIntents
-    ),
-    Env = #{now_ms => Now, rand22 => rand22()},
-    Core2 = meshtastic_server_core:handle_tx_results(Results, Env, Core1),
-    case meshtastic_server_core:next_wakeup(Core2, Now) of
+    case Delay of
         infinity -> ok;
-        Delay -> erlang:send_after(Delay, self(), tx_pump)
-    end,
-    State#state{core = Core2}.
+        D -> erlang:send_after(D, self(), tx_pump)
+    end.
 
 %%------------------------------------------------------------------------------
 %% PKI peer-key pre-resolution
