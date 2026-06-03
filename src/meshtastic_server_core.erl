@@ -111,6 +111,10 @@
 -define(SNR_MAX, 10).
 -define(REBROADCAST_SLOT_MS, 13).
 
+-define(ROUTE_SIZE, 8).
+-define(NODENUM_BROADCAST, 16#FFFFFFFF).
+-define(SNR_UNKNOWN, -128).
+
 %%------------------------------------------------------------------------------
 %% Construction
 %%------------------------------------------------------------------------------
@@ -159,10 +163,10 @@ handle_rx(#{src := Src, packet_id := PacketId} = Packet, Attributes, Env, Core) 
             handle_recipient(Packet, Attributes, Env, PrunedLastSeen, Core);
         not Duplicated ->
             ?MESH_TRACE("[mesh] rx not-for-us, will forward src=~p pid=~p~n", [Src, PacketId]),
-            Core1 = enqueue_rebroadcast(
-                Packet, Attributes, Env, Core#core{last_seen = PrunedLastSeen}
-            ),
-            {ok, Core1, []};
+            Core0 = Core#core{last_seen = PrunedLastSeen},
+            Msg = relay_decode(Packet, Core0),
+            Core1 = enqueue_rebroadcast(Packet, Msg, Attributes, Env, Core0),
+            {ok, Core1, route_learn_effects(Packet, Msg, Core0)};
         true ->
             ?MESH_TRACE("[mesh] rx duplicate src=~p pid=~p~n", [Src, PacketId]),
             {discard, Core, []}
@@ -183,8 +187,8 @@ handle_recipient(Packet, Attributes, Env, PrunedLastSeen, Core) ->
                     },
                     Core1 = Core#core{last_seen = PrunedLastSeen},
                     Core2 = enqueue_replies(Packet, Message, Attributes, Env, Core1),
-                    Core3 = enqueue_rebroadcast(Packet, Attributes, Env, Core2),
-                    LearnEffects = route_learn_effects(Packet, Message),
+                    Core3 = enqueue_rebroadcast(Packet, Message, Attributes, Env, Core2),
+                    LearnEffects = route_learn_effects(Packet, Message, Core1),
                     {ok, Core3, [{deliver, DecodedPacket} | LearnEffects]}
             catch
                 _:_ ->
@@ -264,28 +268,61 @@ enqueue_replies(Packet, Message, Attributes, Env, Core) ->
     end.
 
 traceroute_reply(
-    #{src := Src, dest := Dest, packet_id := OrigPid},
+    #{src := Src, dest := Dest, packet_id := OrigPid} = Packet,
     #{portnum := 'TRACEROUTE_APP', want_response := true} = Message,
     Attributes,
     Env,
     #core{node_id = Dest} = Core
 ) when Dest =/= ?BROADCAST_ADDR ->
-    Route = maps:get(payload, Message, #{}),
-    Existing = maps:get(snr_towards, Route, []),
-    SnrVal = snr_byte(maps:get(snr, Attributes, undefined)),
+    Route0 = maps:get(payload, Message, #{}),
+    SnrByte = snr_byte(maps:get(snr, Attributes, undefined)),
+    Route1 = annotate_route(Route0, true, true, Dest, SnrByte, hops_taken(Packet)),
     Data = #{
         portnum => 'TRACEROUTE_APP',
-        payload => Route#{snr_towards => Existing ++ [SnrVal]},
+        payload => Route1,
         request_id => OrigPid
     },
     Bin = erlang:iolist_to_binary(meshtastic_proto:encode(Data)),
-    ?MESH_TRACE("[mesh] traceroute reply -> src=~p req=~p snr=~p~n", [Src, OrigPid, SnrVal]),
+    ?MESH_TRACE("[mesh] traceroute reply -> src=~p req=~p snr=~p~n", [Src, OrigPid, SnrByte]),
     {true, originate(Src, Bin, Env, Core)};
 traceroute_reply(_Packet, _Message, _Attributes, _Env, Core) ->
     {false, Core}.
 
-snr_byte(undefined) -> -128;
+snr_byte(undefined) -> ?SNR_UNKNOWN;
 snr_byte(Snr) -> clamp(trunc(Snr * 4), -127, 127).
+
+annotate_route(Route, IsTowardsDest, SnrOnly, NodeId, SnrByte, HopsTaken) ->
+    {RouteKey, SnrKey} =
+        case IsTowardsDest of
+            true -> {route, snr_towards};
+            false -> {route_back, snr_back}
+        end,
+    R0 = maps:get(RouteKey, Route, []),
+    S0 = maps:get(SnrKey, Route, []),
+    R1 = pad_to(R0, HopsTaken, ?NODENUM_BROADCAST),
+    S1 = pad_to(S0, length(R1), ?SNR_UNKNOWN),
+    S2 = append_capped(S1, SnrByte),
+    R2 =
+        case SnrOnly of
+            true -> R1;
+            false -> append_capped(R1, NodeId)
+        end,
+    Route#{RouteKey => R2, SnrKey => S2}.
+
+pad_to(List, Target, Fill) ->
+    Want = min(max(Target, length(List)), ?ROUTE_SIZE),
+    List ++ lists:duplicate(Want - length(List), Fill).
+
+append_capped(List, X) ->
+    case length(List) < ?ROUTE_SIZE of
+        true -> List ++ [X];
+        false -> List
+    end.
+
+hops_taken(#{hop_start := HopStart, hop_limit := HopLimit}) when HopStart > 0, HopLimit =< HopStart ->
+    HopStart - HopLimit;
+hops_taken(_) ->
+    0.
 
 node_info_reply(
     #{src := Src, packet_id := OrigPid},
@@ -326,10 +363,12 @@ ack_reply(_Packet, _Message, _Env, Core) ->
 %% flood, while a packet that named us as the next hop is re-directed toward its
 %% dest from our learned routes (else falls back to flooding). Skipped for
 %% unicasts to us, exhausted hop limits, and packets directed at another named hop.
-enqueue_rebroadcast(#{dest := Dest} = _Packet, _Attributes, _Env, #core{node_id = Dest} = Core) ->
+enqueue_rebroadcast(
+    #{dest := Dest} = _Packet, _MaybeMessage, _Attributes, _Env, #core{node_id = Dest} = Core
+) ->
     ?MESH_TRACE("[mesh] rebroadcast skip (unicast-to-us)~n", []),
     Core;
-enqueue_rebroadcast(#{hop_limit := 0} = _Packet, _Attributes, _Env, Core) ->
+enqueue_rebroadcast(#{hop_limit := 0} = _Packet, _MaybeMessage, _Attributes, _Env, Core) ->
     ?MESH_TRACE("[mesh] rebroadcast skip (hop=0)~n", []),
     Core;
 enqueue_rebroadcast(
@@ -340,6 +379,7 @@ enqueue_rebroadcast(
         src := Src,
         packet_id := PacketId
     } = Packet,
+    MaybeMessage,
     Attributes,
     Env,
     #core{node_id = NodeId} = Core
@@ -355,10 +395,12 @@ enqueue_rebroadcast(
                     0 -> 0;
                     _ -> next_hop_for(Dest, RelayByte, maps:get(routes, Env, #{}))
                 end,
+            EncData = relay_encrypted_data(Packet, MaybeMessage, Attributes, Core),
             RadioPayload = meshtastic:serialize(Packet#{
                 hop_limit := HopLimit - 1,
                 next_hop := NewNextHop,
-                relay_node := RelayByte
+                relay_node := RelayByte,
+                encrypted_data := EncData
             }),
             Snr = maps:get(snr, Attributes, undefined),
             Delay = rebroadcast_delay_ms(Snr, maps:get(rand22, Env)),
@@ -373,13 +415,81 @@ enqueue_rebroadcast(
             )
     end.
 
-route_learn_effects(#{src := Src, relay_node := Relay}, Message) ->
+relay_encrypted_data(
+    #{channel_hash := Hash} = Packet,
+    #{portnum := 'TRACEROUTE_APP'} = Message,
+    Attributes,
+    #core{channel = #{hash := Hash, psk := Psk}, node_id = NodeId}
+) ->
+    Route0 = maps:get(payload, Message, #{}),
+    IsTowardsDest = maps:get(request_id, Message, 0) =:= 0,
+    SnrByte = snr_byte(maps:get(snr, Attributes, undefined)),
+    Route1 = annotate_route(Route0, IsTowardsDest, false, NodeId, SnrByte, hops_taken(Packet)),
+    NewData = erlang:iolist_to_binary(meshtastic_proto:encode(Message#{payload => Route1})),
+    Enc = meshtastic:encrypt(Packet#{data => NewData}, Psk),
+    maps:get(encrypted_data, Enc);
+relay_encrypted_data(Packet, _MaybeMessage, _Attributes, _Core) ->
+    maps:get(encrypted_data, Packet).
+
+relay_decode(#{channel_hash := Hash} = Packet, #core{channel = #{hash := Hash, psk := Psk}}) ->
+    try
+        #{data := Data} = meshtastic:decrypt(Packet, Psk),
+        meshtastic_proto:decode(Data)
+    catch
+        _:_ -> undefined
+    end;
+relay_decode(_Packet, _Core) ->
+    undefined.
+
+route_learn_effects(_Packet, undefined, _Core) ->
+    [];
+route_learn_effects(#{src := Src, relay_node := Relay} = Packet, Message, Core) ->
     IsAckOrReply =
         maps:get(request_id, Message, 0) =/= 0 orelse maps:get(reply_id, Message, 0) =/= 0,
-    case IsAckOrReply andalso Relay =/= 0 of
-        true -> [{learn, Src, Relay}];
-        false -> []
-    end.
+    RelayLearn =
+        case IsAckOrReply andalso Relay =/= 0 of
+            true -> [{learn, Src, Relay}];
+            false -> []
+        end,
+    RelayLearn ++ traceroute_route_learn(Packet, Message, Core).
+
+traceroute_route_learn(
+    #{src := ReplySrc, dest := Dest, channel_hash := Hash},
+    #{portnum := 'TRACEROUTE_APP', request_id := ReqId} = Message,
+    #core{channel = #{hash := Hash}, node_id = NodeId}
+) when ReqId =/= 0 ->
+    Route = maps:get(route, maps:get(payload, Message, #{}), []),
+    NextHopIndex =
+        if
+            Dest =:= NodeId -> 0;
+            true -> idx_after(NodeId, Route)
+        end,
+    case NextHopIndex of
+        none ->
+            [];
+        _ ->
+            Tail = lists:nthtail(NextHopIndex, Route),
+            NextHop =
+                case Tail of
+                    [] -> ReplySrc;
+                    [Next | _] -> Next
+                end,
+            case NextHop of
+                ?NODENUM_BROADCAST ->
+                    [];
+                _ ->
+                    Byte = meshtastic:relay_node_byte(NextHop),
+                    Downstream = [N || N <- Tail, N =/= ?NODENUM_BROADCAST],
+                    [{learn, Target, Byte} || Target <- Downstream ++ [ReplySrc]]
+            end
+    end;
+traceroute_route_learn(_Packet, _Message, _Core) ->
+    [].
+
+idx_after(X, List) -> idx_after(X, List, 0).
+idx_after(_X, [], _I) -> none;
+idx_after(X, [X | _], I) -> I + 1;
+idx_after(X, [_ | T], I) -> idx_after(X, T, I + 1).
 
 %%------------------------------------------------------------------------------
 %% Send / periodic

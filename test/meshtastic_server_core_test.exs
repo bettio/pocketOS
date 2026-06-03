@@ -368,6 +368,24 @@ defmodule MeshtasticServerCoreTest do
     assert msg.payload.snr_towards == [20, -8, 44]
   end
 
+  test "a traceroute reply pads hops that upstream relays left unannotated" do
+    packet =
+      rx_packet(%{
+        dest: @us,
+        data: traceroute_data(%{}, want_response: true),
+        hop_start: 4,
+        hop_limit: 2
+      })
+
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [reply] = drain(core2)
+    {_p, msg} = decode_wire(reply)
+    assert msg.request_id == @orig_pid
+    assert msg.payload.route == [0xFFFFFFFF, 0xFFFFFFFF]
+    assert msg.payload.snr_towards == [-128, -128, 44]
+  end
+
   test "a traceroute reply takes precedence over the ROUTING ack" do
     packet =
       rx_packet(%{dest: @us, want_ack: true, data: traceroute_data(%{}, want_response: true)})
@@ -381,14 +399,16 @@ defmodule MeshtasticServerCoreTest do
     assert msg.request_id == @orig_pid
   end
 
-  test "a broadcast traceroute request is flooded but not replied to" do
+  test "a broadcast traceroute request is flooded (annotated) but not replied to" do
     packet = rx_packet(%{dest: @broadcast, data: traceroute_data(%{}, want_response: true)})
     {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
 
     assert [rebroadcast] = drain(core2)
-    {:ok, p} = :meshtastic.parse(rebroadcast)
+    {p, msg} = decode_wire(rebroadcast)
     assert p.packet_id == @orig_pid
     assert p.hop_limit == 2
+    assert msg.payload.route == [@us]
+    assert msg.payload.snr_towards == [44]
   end
 
   test "a traceroute response to us is neither replied to nor acked" do
@@ -400,6 +420,101 @@ defmodule MeshtasticServerCoreTest do
     packet = rx_packet(%{dest: @us, want_ack: true, data: data})
     {:ok, core2, _effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
     assert drain(core2) == []
+  end
+
+  # ---- handle_rx: TRACEROUTE relay annotation ----
+
+  test "a transiting traceroute request is annotated with our id and snr before relay" do
+    packet = rx_packet(%{dest: 0x12345678, data: traceroute_data(%{}, want_response: true)})
+
+    {:ok, core2, []} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [wire] = drain(core2)
+    {p, msg} = decode_wire(wire)
+    assert p.dest == 0x12345678
+    assert p.hop_limit == 2
+    assert p.relay_node == :meshtastic.relay_node_byte(@us)
+    assert msg.portnum == :TRACEROUTE_APP
+    assert msg.payload.route == [@us]
+    assert msg.payload.snr_towards == [44]
+    assert msg.want_response == true
+  end
+
+  test "a transiting traceroute reply is annotated on the route_back arrays" do
+    data = traceroute_data(%{route: [0xA], snr_towards: [20]}, request_id: 0x99)
+    packet = rx_packet(%{dest: 0x12345678, data: data})
+
+    {:ok, core2, _effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [wire] = drain(core2)
+    {_p, msg} = decode_wire(wire)
+    assert msg.request_id == 0x99
+    assert msg.payload.route == [0xA]
+    assert msg.payload.snr_towards == [20]
+    assert msg.payload.route_back == [@us]
+    assert msg.payload.snr_back == [44]
+  end
+
+  test "a relayed traceroute request appends to an existing route" do
+    data = traceroute_data(%{route: [0xA], snr_towards: [20]}, want_response: true)
+    packet = rx_packet(%{dest: 0x12345678, data: data, hop_start: 3, hop_limit: 2})
+
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [wire] = drain(core2)
+    {_p, msg} = decode_wire(wire)
+    assert msg.payload.route == [0xA, @us]
+    assert msg.payload.snr_towards == [20, 44]
+  end
+
+  test "a relayed traceroute pads hops that upstream relays left unannotated" do
+    packet =
+      rx_packet(%{
+        dest: 0x12345678,
+        data: traceroute_data(%{}, want_response: true),
+        hop_start: 4,
+        hop_limit: 2
+      })
+
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [wire] = drain(core2)
+    {p, msg} = decode_wire(wire)
+    assert p.hop_limit == 1
+    assert msg.payload.route == [0xFFFFFFFF, 0xFFFFFFFF, @us]
+    assert msg.payload.snr_towards == [-128, -128, 44]
+  end
+
+  test "a transiting non-traceroute packet is relayed verbatim (ciphertext unchanged)" do
+    packet = rx_packet(%{dest: 0x12345678, data: text_data("hello")})
+
+    {:ok, core2, []} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [wire] = drain(core2)
+    {:ok, relayed} = :meshtastic.parse(wire)
+    assert relayed.encrypted_data == packet.encrypted_data
+    assert relayed.hop_limit == 2
+  end
+
+  test "a transiting PKI packet (channel_hash 0) is relayed verbatim, never annotated" do
+    packet = rx_packet(%{dest: 0x12345678, channel_hash: 0, data: text_data("dm")})
+
+    {:ok, core2, []} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [wire] = drain(core2)
+    {:ok, relayed} = :meshtastic.parse(wire)
+    assert relayed.encrypted_data == packet.encrypted_data
+  end
+
+  test "a transiting traceroute reply teaches next-hops toward downstream nodes" do
+    data = traceroute_data(%{route: [@us, 0xC]}, request_id: 0x99)
+    packet = rx_packet(%{dest: 0x12345678, src: 0xD, data: data})
+
+    {:ok, _core2, effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    byte_c = :meshtastic.relay_node_byte(0xC)
+    assert {:learn, 0xC, byte_c} in effects
+    assert {:learn, 0xD, byte_c} in effects
   end
 
   # ---- handle_rx: rebroadcast rules ----
