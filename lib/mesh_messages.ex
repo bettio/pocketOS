@@ -117,6 +117,14 @@ defmodule UI.MeshMessages do
             height: 32,
             width: 48,
             text: "Send"
+          },
+          %Button{
+            name: :back_button,
+            x: 0,
+            y: 0,
+            height: 32,
+            width: 48,
+            text: "Back"
           }
         ]
       }
@@ -373,6 +381,12 @@ defmodule UI.MeshMessages do
       {:error, reason} ->
         show_result(ui, state, :failure, "Failed: #{inspect(reason)}")
     end
+  end
+
+  def handle_event(:back_button, :clicked, ui, state) do
+    state = %{state | screen: :inbox}
+    {updated_ui, new_state} = reload_model(UIServer.replace_ui(ui, get_ui()), state)
+    {:noreply, updated_ui, new_state}
   end
 
   def handle_event(:grid, {:clicked, _index, %{id: _id} = _item}, _ui, state) do
