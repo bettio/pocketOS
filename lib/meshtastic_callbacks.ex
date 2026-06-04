@@ -153,6 +153,32 @@ defmodule MeshtasticCallbacks do
     result
   end
 
+  def send_text_message_async(text) do
+    MeshTrace.trace("[mesh] send_text_message_async: #{inspect(text)}")
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: text}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    result = :meshtastic_server.send_async(:meshtastic_server, 0xFFFFFFFF, data)
+    MeshTrace.trace("[mesh] send_text_message_async result: #{inspect(result)}")
+    result
+  end
+
+  def send_direct_message_async(dest_node_id, text) do
+    MeshTrace.trace("[mesh] send_direct_message_async: dest=#{dest_node_id} #{inspect(text)}")
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: text}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    result = :meshtastic_server.send_async(:meshtastic_server, dest_node_id, data, %{pki: true})
+    MeshTrace.trace("[mesh] send_direct_message_async result: #{inspect(result)}")
+    result
+  end
+
   def send_traceroute(dest_node_id) do
     MeshTrace.trace("[mesh] send_traceroute: dest=#{dest_node_id}")
 

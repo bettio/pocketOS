@@ -8,6 +8,9 @@ alias PhotonUI.Widgets.TextInput
 alias PhotonUI.UIServer
 
 defmodule UI.MeshMessages do
+  @result_ms 10_000
+  @send_failsafe_ms 60_000
+
   def get_ui do
     avail_mem =
       try do
@@ -170,6 +173,67 @@ defmodule UI.MeshMessages do
     ]
   end
 
+  defp status_ui(title, lines) do
+    texts = status_texts(lines, [:status_line_0, :status_line_1, :status_line_2])
+
+    [
+      %VerticalLayout{
+        name: :vl,
+        x: 0,
+        y: 0,
+        width: 320,
+        height: 240,
+        spacing: 8,
+        children: [
+          %Container{
+            name: :title_bar,
+            x: 0,
+            y: 0,
+            width: 320,
+            height: 16,
+            children: [
+              %Rectangle{
+                name: :title_label_bg,
+                x: 0,
+                y: 0,
+                height: 16,
+                width: 320,
+                color: 0x000000
+              },
+              %Text{
+                name: :title_label,
+                x: 8,
+                y: 0,
+                height: 16,
+                width: byte_size(title) * 8,
+                text: title,
+                bgcolor: 0x4792EC
+              }
+            ]
+          }
+          | texts
+        ]
+      }
+    ]
+  end
+
+  # TODO: fold into an Enum.with_index/1 pipeline once AtomVM's Enum has it
+  defp status_texts([], _names), do: []
+
+  defp status_texts([line | rest], [name | names]) do
+    [
+      %Text{
+        name: name,
+        x: 8,
+        y: 0,
+        height: 16,
+        width: max(byte_size(line) * 8, 8),
+        text: line
+      }
+      | status_texts(rest, names)
+    ]
+  end
+
   def start_link(args, opts) do
     UIServer.start_link(__MODULE__, args, opts)
   end
@@ -179,7 +243,8 @@ defmodule UI.MeshMessages do
   end
 
   def init(_opts) do
-    {:ok, {get_ui(), %{}}, %{recipient: :broadcast, draft: ""}}
+    {:ok, {get_ui(), %{}},
+     %{recipient: :broadcast, draft: "", screen: :inbox, pending_ref: nil, result: nil}}
   end
 
   def handle_call(_msg, _from, state) do
@@ -190,9 +255,51 @@ defmodule UI.MeshMessages do
     {:noreply, state}
   end
 
-  def handle_info({:mnesia_table_event, {:write, _, _}}, ui, state) do
+  def handle_info({:mnesia_table_event, {:write, _, _}}, ui, %{screen: :inbox} = state) do
     {updated_ui, new_state} = reload_model(ui, state)
     {:noreply, updated_ui, new_state}
+  end
+
+  def handle_info({:mnesia_table_event, _}, _ui, state) do
+    {:noreply, state}
+  end
+
+  def handle_info(
+        {:delivery_update, ref, status},
+        ui,
+        %{screen: :sending, pending_ref: ref} = state
+      ) do
+    case status do
+      {:ack, info} -> show_result(ui, state, :success, ack_text(state.recipient, info))
+      {:nak, reason} -> show_result(ui, state, :failure, "Failed: #{reason}")
+    end
+  end
+
+  def handle_info({:delivery_update, _ref, _status}, _ui, state) do
+    {:noreply, state}
+  end
+
+  def handle_info({:send_failsafe, ref}, ui, %{screen: :sending, pending_ref: ref} = state) do
+    show_result(ui, state, :failure, "Failed: no response")
+  end
+
+  def handle_info({:send_failsafe, _ref}, _ui, state) do
+    {:noreply, state}
+  end
+
+  def handle_info(:result_done, ui, %{screen: :result, result: :success} = state) do
+    state = %{state | recipient: :broadcast, draft: "", screen: :inbox, result: nil}
+    {updated_ui, new_state} = reload_model(UIServer.replace_ui(ui, get_ui()), state)
+    {:noreply, updated_ui, new_state}
+  end
+
+  def handle_info(:result_done, ui, %{screen: :result, result: :failure} = state) do
+    state = %{state | screen: :compose, result: nil}
+    {:noreply, show_compose(ui, state), state}
+  end
+
+  def handle_info(:result_done, _ui, state) do
+    {:noreply, state}
   end
 
   def handle_info(msg, _ui, state) do
@@ -203,7 +310,7 @@ defmodule UI.MeshMessages do
   def handle_event(:ui, :shown, ui, state) do
     :micronesia.subscribe({:table, :meshtastic_message, :simple})
 
-    {updated_ui, new_state} = reload_model(ui, state)
+    {updated_ui, new_state} = reload_model(ui, %{state | screen: :inbox})
 
     {:noreply, updated_ui, new_state}
   end
@@ -213,12 +320,16 @@ defmodule UI.MeshMessages do
   end
 
   def handle_event(:grid, {:clicked, _index, %{id: :compose} = _item}, ui, state) do
-    state = %{state | recipient: :broadcast, draft: ""}
+    state = %{state | recipient: :broadcast, draft: "", screen: :compose}
     {:noreply, show_compose(ui, state), state}
   end
 
   def handle_event(:pick_recipient, :clicked, ui, state) do
-    state = %{state | draft: UIServer.get_property!(ui, :message_input, :text)}
+    state = %{
+      state
+      | draft: UIServer.get_property!(ui, :message_input, :text),
+        screen: :picker
+    }
 
     ui =
       ui
@@ -229,27 +340,39 @@ defmodule UI.MeshMessages do
   end
 
   def handle_event(:recipients, {:clicked, _index, %{id: :cancel}}, ui, state) do
+    state = %{state | screen: :compose}
     {:noreply, show_compose(ui, state), state}
   end
 
   def handle_event(:recipients, {:clicked, _index, %{id: :broadcast}}, ui, state) do
-    state = %{state | recipient: :broadcast}
+    state = %{state | recipient: :broadcast, screen: :compose}
     {:noreply, show_compose(ui, state), state}
   end
 
   def handle_event(:recipients, {:clicked, _index, %{id: node_id, label: label}}, ui, state) do
-    state = %{state | recipient: {node_id, label}}
+    state = %{state | recipient: {node_id, label}, screen: :compose}
     {:noreply, show_compose(ui, state), state}
   end
 
   def handle_event(:send_button, :clicked, ui, state) do
     text = UIServer.get_property!(ui, :message_input, :text)
+    state = %{state | draft: text}
 
-    send_to(state.recipient, text)
+    case send_async_to(state.recipient, text) do
+      {:ok, ref} ->
+        :erlang.send_after(@send_failsafe_ms, self(), {:send_failsafe, ref})
 
-    state = %{state | recipient: :broadcast, draft: ""}
-    {updated_ui, new_state} = reload_model(UIServer.replace_ui(ui, get_ui()), state)
-    {:noreply, updated_ui, new_state}
+        ui =
+          UIServer.replace_ui(
+            ui,
+            status_ui(" Sending ", ["To: " <> recipient_label(state.recipient), "Sending..."])
+          )
+
+        {:noreply, ui, %{state | screen: :sending, pending_ref: ref}}
+
+      {:error, reason} ->
+        show_result(ui, state, :failure, "Failed: #{inspect(reason)}")
+    end
   end
 
   def handle_event(:grid, {:clicked, _index, %{id: _id} = _item}, _ui, state) do
@@ -261,10 +384,26 @@ defmodule UI.MeshMessages do
     {:noreply, state}
   end
 
-  defp send_to(:broadcast, text), do: MeshtasticCallbacks.send_text_message(text)
+  defp send_async_to(:broadcast, text), do: MeshtasticCallbacks.send_text_message_async(text)
 
-  defp send_to({node_id, _label}, text),
-    do: MeshtasticCallbacks.send_direct_message(node_id, text)
+  defp send_async_to({node_id, _label}, text),
+    do: MeshtasticCallbacks.send_direct_message_async(node_id, text)
+
+  defp show_result(ui, state, kind, text) do
+    :erlang.send_after(@result_ms, self(), :result_done)
+
+    ui =
+      UIServer.replace_ui(
+        ui,
+        status_ui(" Message status ", ["To: " <> recipient_label(state.recipient), text])
+      )
+
+    {:noreply, ui, %{state | screen: :result, result: kind, pending_ref: nil}}
+  end
+
+  defp ack_text(:broadcast, _info), do: "Delivered"
+  defp ack_text({_node_id, _label}, %{implicit: true}), do: "Sent to mesh"
+  defp ack_text({_node_id, _label}, _info), do: "Delivered"
 
   defp recipient_label(:broadcast), do: "Broadcast"
   defp recipient_label({_node_id, label}), do: label
