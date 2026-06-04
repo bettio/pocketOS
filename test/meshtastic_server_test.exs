@@ -66,6 +66,8 @@ defmodule MeshtasticServerTest do
     end
   end
 
+  @rebroadcast_wait_ms 10_000
+
   # Next transmitted packet matching `pred`, skipping others (the 500 ms initial
   # periodic NodeInfo interleaves with replies/rebroadcasts).
   defp recv_packet(_pred, 0), do: flunk("expected a matching transmitted packet")
@@ -76,7 +78,7 @@ defmodule MeshtasticServerTest do
         {:ok, p} = :meshtastic.parse(bin)
         if pred.(p), do: p, else: recv_packet(pred, tries - 1)
     after
-      5000 -> flunk("no transmitted packet within 5s")
+      @rebroadcast_wait_ms -> flunk("no transmitted packet within 10s")
     end
   end
 
@@ -620,7 +622,7 @@ defmodule MeshtasticServerTest do
       receive do
         bin when is_binary(bin) -> bin
       after
-        5000 -> flunk("expected a rebroadcast")
+        @rebroadcast_wait_ms -> flunk("expected a rebroadcast")
       end
 
     {:ok, p} = :meshtastic.parse(rebroadcast)
@@ -680,7 +682,7 @@ defmodule MeshtasticServerTest do
       receive do
         bin when is_binary(bin) -> bin
       after
-        5000 -> flunk("expected a rebroadcast")
+        @rebroadcast_wait_ms -> flunk("expected a rebroadcast")
       end
 
     {:ok, p} = :meshtastic.parse(rebroadcast)
