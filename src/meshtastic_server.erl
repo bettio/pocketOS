@@ -13,6 +13,9 @@
 %% and pumps the core's tx_queue out to the radio. All packet logic lives in
 %% the core; see meshtastic_server_core.erl.
 %%
+%% On-air tested against meshtastic 2.7.15.567b8ea: all implemented features
+%% verified working.
+%%
 
 -export([
     start_link/2,
