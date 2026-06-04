@@ -23,7 +23,28 @@
     }}
 ).
 -define(ROUTING_SCHEMA, #{
-    error_reason => {3, {enum, #{'NONE' => 0}}}
+    error_reason =>
+        {3,
+            {enum, #{
+                'NONE' => 0,
+                'NO_ROUTE' => 1,
+                'GOT_NAK' => 2,
+                'TIMEOUT' => 3,
+                'NO_INTERFACE' => 4,
+                'MAX_RETRANSMIT' => 5,
+                'NO_CHANNEL' => 6,
+                'TOO_LARGE' => 7,
+                'NO_RESPONSE' => 8,
+                'DUTY_CYCLE_LIMIT' => 9,
+                'BAD_REQUEST' => 32,
+                'NOT_AUTHORIZED' => 33,
+                'PKI_FAILED' => 34,
+                'PKI_UNKNOWN_PUBKEY' => 35,
+                'ADMIN_BAD_SESSION_KEY' => 36,
+                'ADMIN_PUBLIC_KEY_UNAUTHORIZED' => 37,
+                'RATE_LIMIT_EXCEEDED' => 38,
+                'PKI_SEND_FAIL_PUBLIC_KEY' => 39
+            }}}
 }).
 -define(ROUTE_DISCOVERY_SCHEMA, #{
     route => {1, {repeated, fixed32}},
@@ -102,6 +123,10 @@ decode(Data) ->
                         Telemetry
                 end,
             ParsedMain#{payload := NewPayload};
+        #{portnum := 'ROUTING_APP'} ->
+            RoutingSchema = aprotobuf_decoder:transform_schema(?ROUTING_SCHEMA),
+            RoutingPayload = maps:get(payload, ParsedMain, <<>>),
+            ParsedMain#{payload => aprotobuf_decoder:parse(RoutingPayload, RoutingSchema)};
         #{portnum := 'TRACEROUTE_APP'} ->
             RouteSchema = aprotobuf_decoder:transform_schema(?ROUTE_DISCOVERY_SCHEMA),
             Payload = maps:get(payload, ParsedMain, <<>>),
