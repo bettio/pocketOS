@@ -38,7 +38,7 @@
 -export([init/1, waiting_to_receive/3, waiting_tx_done/3, terminate/3]).
 
 %% Pure helpers, exported for tests
--export([channel_windows/1, classify_channel_activity/4]).
+-export([channel_windows/1, classify_channel_activity/4, cad_det_peak/1]).
 
 % -define(TRACE_ENABLED, true).
 -include_lib("trace.hrl").
@@ -49,6 +49,11 @@
 -define(TX_HW_TIMEOUT, 640000).
 %% broadcast/2 call timeout: must exceed the 9000 ms waiting_tx_done state_timeout
 -define(TX_CALL_TIMEOUT_MS, 30000).
+
+-define(CAD_NUM_SYMBOLS, 2).
+-define(CAD_DET_MIN, 10).
+-define(CAD_POLL_SLEEP_MS, 2).
+-define(CAD_POLL_TRIES, 150).
 
 %%
 %% Lora Provider API
@@ -86,6 +91,7 @@ sleep(Lora) ->
     pending,
     preamble_window_ms,
     max_packet_ms,
+    cad_det_peak,
     rx_activity_start = 0
 }).
 
@@ -110,8 +116,11 @@ init(Config) ->
                     erlang:send_after(?AGC_RESET_INTERVAL_MS, self(), agc_reset),
 
                     {PreambleWindowMs, MaxPacketMs} = channel_windows(Config),
-                    ?TRACE("channel guard: preamble_window=~pms max_packet=~pms", [
-                        PreambleWindowMs, MaxPacketMs
+                    CadDetPeak = cad_det_peak(
+                        sf_numeric(maps:get(spreading_factor, Config, sf_7))
+                    ),
+                    ?TRACE("channel guard: preamble_window=~pms max_packet=~pms cad_peak=~p", [
+                        PreambleWindowMs, MaxPacketMs, CadDetPeak
                     ]),
 
                     State = #state{
@@ -120,7 +129,8 @@ init(Config) ->
                         irq = maps:get(irq, Config, undefined),
                         busy_pin = BusyPin,
                         preamble_window_ms = PreambleWindowMs,
-                        max_packet_ms = MaxPacketMs
+                        max_packet_ms = MaxPacketMs,
+                        cad_det_peak = CadDetPeak
                     },
                     {ok, waiting_to_receive, State};
                 LoraError ->
@@ -430,11 +440,63 @@ wait_channel_free(State) ->
             NewState = State#state{rx_activity_start = ActivityStart},
             case Verdict of
                 busy -> {{error, channel_busy}, NewState};
-                free -> {ok, NewState}
+                free -> cad_scan(NewState)
             end;
         Error ->
             {Error, State}
     end.
+
+%% @private
+%% Last check before TX: a short CAD scan detects a LoRa transmission in
+%% progress even when its one-shot preamble flag was consumed or it is too
+%% weak for an RSSI read. On detect, go back to RX to try to catch it.
+cad_scan(State) ->
+    #state{spi = SPI, config = Config} = State,
+    StartMs = erlang:monotonic_time(millisecond),
+    ok = sx126x_cmd:set_standby(SPI),
+    ok = sx126x_cmd:set_cad_irq(SPI),
+    ok = sx126x_cmd:clear_irq_status(SPI),
+    ok = sx126x_cmd:set_cad_params(
+        SPI, ?CAD_NUM_SYMBOLS, State#state.cad_det_peak, ?CAD_DET_MIN, cad_only, 0
+    ),
+    ok = sx126x_cmd:set_cad(SPI),
+    Result = poll_cad_done(SPI, ?CAD_POLL_TRIES),
+    ElapsedMs = erlang:monotonic_time(millisecond) - StartMs,
+    case Result of
+        {done, true} ->
+            ?TRACE("CAD: activity detected in ~pms -- channel busy", [ElapsedMs]),
+            set_recv_mode(SPI, Config),
+            {{error, channel_busy}, State};
+        {done, false} ->
+            ?TRACE("CAD: channel clear in ~pms", [ElapsedMs]),
+            {ok, State};
+        timeout ->
+            ?TRACE("CAD: no cad_done after ~pms -- assuming clear", [ElapsedMs]),
+            {ok, State}
+    end.
+
+%% @private
+poll_cad_done(_SPI, 0) ->
+    timeout;
+poll_cad_done(SPI, I) ->
+    IRQFlags = sx126x_cmd:get_irq_status(SPI),
+    case lists:member(cad_done, IRQFlags) of
+        true ->
+            {done, lists:member(cad_detected, IRQFlags)};
+        false ->
+            timer:sleep(?CAD_POLL_SLEEP_MS),
+            poll_cad_done(SPI, I - 1)
+    end.
+
+%% @doc CAD detection peak threshold for a spreading factor, as meshtastic
+%% configures it.
+-spec cad_det_peak(integer()) -> 22..30.
+cad_det_peak(Sf) when Sf =< 7 -> 22;
+cad_det_peak(8) -> 23;
+cad_det_peak(9) -> 24;
+cad_det_peak(10) -> 25;
+cad_det_peak(11) -> 26;
+cad_det_peak(_) -> 30.
 
 %% @doc Decide whether latched RX IRQ flags mean a reception is in progress.
 %% A preamble flag with no header is trusted for PreambleWindowMs, a header

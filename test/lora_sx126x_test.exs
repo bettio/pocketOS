@@ -79,4 +79,16 @@ defmodule LoraSx126xTest do
                )
     end
   end
+
+  describe "cad_det_peak/1" do
+    test "per-SF detection peaks" do
+      assert :lora_sx126x.cad_det_peak(5) == 22
+      assert :lora_sx126x.cad_det_peak(7) == 22
+      assert :lora_sx126x.cad_det_peak(8) == 23
+      assert :lora_sx126x.cad_det_peak(9) == 24
+      assert :lora_sx126x.cad_det_peak(10) == 25
+      assert :lora_sx126x.cad_det_peak(11) == 26
+      assert :lora_sx126x.cad_det_peak(12) == 30
+    end
+  end
 end

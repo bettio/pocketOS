@@ -60,6 +60,8 @@
     disable_all_irq/1,
     set_tx_irq/1,
     set_rx_irq/1,
+    set_cad_irq/1,
+    set_cad/1,
     get_irq_status/1,
     clear_irq_status/1, clear_irq_status/2,
     get_status/1,
@@ -71,7 +73,7 @@
     read_buffer/3,
     read_register/3,
     write_register/3,
-    set_cad_params/1
+    set_cad_params/1, set_cad_params/6
 ]).
 
 % -define(TRACE_ENABLED, true).
@@ -204,13 +206,13 @@ set_rx(SPI, Timeout) ->
 %     Data = <<RxPeriod:24, SleepPeriod:24>>,
 %     write_command(SPI, ?SET_RX_DUTY_CYCLE_OPCODE, Data).
 
-% %% 13.1.8 SetCad
-% -define(SET_CAD_OPCODE, 16#C5).
+%% 13.1.8 SetCad
+-define(SET_CAD_OPCODE, 16#C5).
 
-% %% @private
-% set_cad(SPI) ->
-%     ?TRACE("SetCad()", []),
-%     write_command(SPI, ?SET_CAD_OPCODE, ?EMPTY_BINARY).
+%% @private
+set_cad(SPI) ->
+    ?TRACE("SetCad()", []),
+    write_command(SPI, ?SET_CAD_OPCODE, ?EMPTY_BINARY).
 
 % %% 13.1.9 SetTxContinuousWave
 % -define(SET_TX_CONTINUOUS_WAVE_OPCODE, 16#D1).
@@ -466,6 +468,18 @@ set_rx_irq(SPI) ->
         ?IRQ_MASK_RX_DONE bor ?IRQ_MASK_CRC_ERR bor ?IRQ_MASK_HEADER_ERR bor
             ?IRQ_MASK_TIMEOUT bor ?IRQ_MASK_PREABLE_DETECTED bor ?IRQ_MASK_HEADER_VALID,
         ?IRQ_MASK_RX_DONE,
+        ?IRQ_MASK_NONE,
+        ?IRQ_MASK_NONE
+    ).
+
+%% @private
+%% CAD results latch in the status register only; nothing is routed to DIO1,
+%% so the caller polls instead of taking an interrupt.
+set_cad_irq(SPI) ->
+    set_dio_irq_params(
+        SPI,
+        ?IRQ_MASK_CAD_DONE bor ?IRQ_MASK_CAD_DETECTED,
+        ?IRQ_MASK_NONE,
         ?IRQ_MASK_NONE,
         ?IRQ_MASK_NONE
     ).
@@ -747,22 +761,29 @@ iirq_value(true) -> 16#01.
 
 %% @private
 set_cad_params(SPI) ->
-    % data[0] = SX126X_CAD_ON_8_SYMB
-    % data[1] = self._sf + 13
-    % data[2] = 10
-    % data[3] = SX126X_CAD_GOTO_STDBY
-    % data[4] = 0x00
-    % data[5] = 0x00
-    % data[6] = 0x00
-    set_cad_params(SPI, ?CAD_ON_8_SYMB, 16#19, 10, ?CAD_ONLY, 0).
+    set_cad_params(SPI, 8, 16#19, 10, cad_only, 0).
 
 %% @private
-set_cad_params(SPI, CadSymbolNum, CadDetPeak, CadDetMin, CadExitMode, CadTimeout) ->
+%% NumSymbols is the symbol count (1|2|4|8|16); ExitMode is cad_only | cad_rx.
+set_cad_params(SPI, NumSymbols, CadDetPeak, CadDetMin, ExitMode, CadTimeout) ->
     ?TRACE("SetCadParams(~p, ~p, ~p, ~p, ~p)", [
-        CadSymbolNum, CadDetPeak, CadDetMin, CadExitMode, CadTimeout
+        NumSymbols, CadDetPeak, CadDetMin, ExitMode, CadTimeout
     ]),
-    Data = <<CadSymbolNum:8, CadDetPeak:8, CadDetMin:8, CadExitMode:8, CadTimeout:24>>,
+    Data =
+        <<(cad_symb_value(NumSymbols)):8, CadDetPeak:8, CadDetMin:8, (cad_exit_value(ExitMode)):8,
+            CadTimeout:24>>,
     write_command(SPI, ?SET_CAD_PARAMS_OPCODE, Data).
+
+%% @private
+cad_symb_value(1) -> ?CAD_ON_1_SYMB;
+cad_symb_value(2) -> ?CAD_ON_2_SYMB;
+cad_symb_value(4) -> ?CAD_ON_4_SYMB;
+cad_symb_value(8) -> ?CAD_ON_8_SYMB;
+cad_symb_value(16) -> ?CAD_ON_16_SYMB.
+
+%% @private
+cad_exit_value(cad_only) -> ?CAD_ONLY;
+cad_exit_value(cad_rx) -> ?CAD_RX.
 
 %% 13.4.8 SetBufferBaseAddress
 -define(SET_BUFFER_ADDRESS_OPCODE, 16#8F).
