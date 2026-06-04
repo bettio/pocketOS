@@ -93,6 +93,15 @@ defmodule MeshtasticCallbacks do
     MeshTrace.trace("Got traceroute from #{inspect(src)}: #{inspect(route)}")
   end
 
+  def message_cb(%{message: %{portnum: :ROUTING_APP} = message, src: src} = msg) do
+    pre_process(msg)
+
+    MeshTrace.trace(
+      "Got routing #{inspect(Map.get(message, :payload))} " <>
+        "for req #{inspect(Map.get(message, :request_id))} from #{inspect(src)}"
+    )
+  end
+
   def message_cb(msg) do
     pre_process(msg)
     MeshTrace.trace("Got unexpected message: #{inspect(msg)}")
