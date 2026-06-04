@@ -67,7 +67,9 @@ defmodule RadioLauncher do
            node_id: node_id,
            node_info: meshtastic_node_info,
            channel: channel,
-           private_key: private_key
+           private_key: private_key,
+           spreading_factor: Map.fetch!(complete_config, :spreading_factor),
+           bandwidth_hz: Map.fetch!(complete_config, :bandwidth_hz)
          ]}
       ])
   end

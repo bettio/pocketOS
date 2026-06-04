@@ -926,7 +926,7 @@ defmodule MeshtasticServerCoreTest do
   end
 
   test "take_one_due returns a later due intent, leaving an earlier not-yet-due one queued" do
-    # queue head is a deferred rebroadcast (not_before 1208); an immediate own-send follows
+    # queue head is a deferred rebroadcast (not_before 1448); an immediate own-send follows
     packet = rx_packet(%{data: text_data("flood")})
 
     {:ok, c1, _} =
@@ -943,9 +943,9 @@ defmodule MeshtasticServerCoreTest do
     {%{} = first, c3} = :meshtastic_server_core.take_one_due(c2, 1000)
     assert first.not_before == :now
     refute :meshtastic_server_core.has_due(c3, 1000)
-    assert :meshtastic_server_core.has_due(c3, 1208)
-    {%{} = second, _} = :meshtastic_server_core.take_one_due(c3, 1208)
-    assert second.not_before == 1208
+    assert :meshtastic_server_core.has_due(c3, 1448)
+    {%{} = second, _} = :meshtastic_server_core.take_one_due(c3, 1448)
+    assert second.not_before == 1448
   end
 
   test "has_due reflects whether any intent is due at the given time" do
@@ -965,7 +965,7 @@ defmodule MeshtasticServerCoreTest do
       )
 
     refute :meshtastic_server_core.has_due(c2, 1000)
-    assert :meshtastic_server_core.has_due(c2, 1208)
+    assert :meshtastic_server_core.has_due(c2, 1448)
   end
 
   # ---- handle_tx_results: channel-access retry / back-off ----
@@ -1084,17 +1084,29 @@ defmodule MeshtasticServerCoreTest do
     assert :meshtastic_server_core.cw_size(:undefined) == 8
   end
 
-  test "rebroadcast_delay_ms: 208 ms floor, and a weaker signal has a much shorter ceiling" do
-    # delay = 2*CWmax*slot + (rand rem 2^CWsize)*slot; offset = 2*8*13 = 208, slot = 13
-    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 0) == 208
-    assert :meshtastic_server_core.rebroadcast_delay_ms(10, 0) == 208
+  test "rebroadcast_delay_ms: slot floor, and a weaker signal has a much shorter ceiling" do
+    # delay = 2*CWmax*slot + (rand rem 2^CWsize)*slot; SF9/BW250 slot = 13 -> offset 2*8*13 = 208
+    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 0, 13) == 208
+    assert :meshtastic_server_core.rebroadcast_delay_ms(10, 0, 13) == 208
     # far (snr -15, window 8): ceiling 208 + 7*13 = 299
-    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 7) == 299
+    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 7, 13) == 299
     # near (snr 10, window 256): ceiling 208 + 255*13 = 3523 -> far relays much sooner
-    assert :meshtastic_server_core.rebroadcast_delay_ms(10, 255) == 3523
+    assert :meshtastic_server_core.rebroadcast_delay_ms(10, 255, 13) == 3523
+    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 0, 28) == 448
+    assert :meshtastic_server_core.rebroadcast_delay_ms(-15, 7, 28) == 644
+    assert :meshtastic_server_core.rebroadcast_delay_ms(10, 255, 28) == 7588
     # undefined SNR behaves like the strongest (longest) reception
-    assert :meshtastic_server_core.rebroadcast_delay_ms(:undefined, 123) ==
-             :meshtastic_server_core.rebroadcast_delay_ms(10, 123)
+    assert :meshtastic_server_core.rebroadcast_delay_ms(:undefined, 123, 28) ==
+             :meshtastic_server_core.rebroadcast_delay_ms(10, 123, 28)
+  end
+
+  test "slot_time_ms derives the CAD slot from the modulation, with a safe fallback" do
+    assert :meshtastic_server_core.slot_time_ms(9, 250_000) == 13
+    assert :meshtastic_server_core.slot_time_ms(11, 250_000) == 28
+    assert :meshtastic_server_core.slot_time_ms(12, 125_000) == 90
+    assert :meshtastic_server_core.slot_time_ms(:undefined, :undefined) == 28
+    assert :meshtastic_server_core.slot_time_ms(:sf_9, 250_000) == 28
+    assert :meshtastic_server_core.slot_time_ms(11, 0) == 28
   end
 
   test "a recipient broadcast is rebroadcast deferred by the SNR delay, tagged with its origin" do
@@ -1104,12 +1116,28 @@ defmodule MeshtasticServerCoreTest do
     {:ok, core2, _effects} =
       :meshtastic_server_core.handle_rx(packet, %{rssi: -100, snr: -15}, e, core())
 
-    # rand22 = 0 -> delay == the 208 ms floor; deferred, not sent immediately
+    # rand22 = 0 -> delay == the 2*8*28 = 448 ms floor (default slot); deferred,
+    # not sent immediately
     assert {[], _} = :meshtastic_server_core.take_due(core2, 1000)
-    assert :meshtastic_server_core.next_wakeup(core2, 1000) == 208
-    {[intent], _} = :meshtastic_server_core.take_due(core2, 1208)
-    assert intent.not_before == 1208
+    assert :meshtastic_server_core.next_wakeup(core2, 1000) == 448
+    {[intent], _} = :meshtastic_server_core.take_due(core2, 1448)
+    assert intent.not_before == 1448
     assert intent.ref == {@peer, @orig_pid}
+  end
+
+  test "the rebroadcast delay follows the slot derived from the configured modulation" do
+    packet = rx_packet(%{data: text_data("flood")})
+    e = env(%{now_ms: 1000, rand22: 0})
+
+    {:ok, core2, _effects} =
+      :meshtastic_server_core.handle_rx(
+        packet,
+        %{rssi: -100, snr: -15},
+        e,
+        core(spreading_factor: 9, bandwidth_hz: 250_000)
+      )
+
+    assert :meshtastic_server_core.next_wakeup(core2, 1000) == 208
   end
 
   test "a not-for-us forwarded packet is also deferred and tagged with its origin" do
@@ -1119,8 +1147,8 @@ defmodule MeshtasticServerCoreTest do
     {:ok, core2, []} =
       :meshtastic_server_core.handle_rx(packet, %{rssi: -90, snr: 0}, e, core())
 
-    {[intent], _} = :meshtastic_server_core.take_due(core2, 5208)
-    assert intent.not_before == 5208
+    {[intent], _} = :meshtastic_server_core.take_due(core2, 5448)
+    assert intent.not_before == 5448
     assert intent.ref == {@peer, @orig_pid}
   end
 

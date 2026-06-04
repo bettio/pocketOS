@@ -30,7 +30,8 @@
     has_due/2,
     handle_tx_results/3,
     next_wakeup/2,
-    rebroadcast_delay_ms/2,
+    rebroadcast_delay_ms/3,
+    slot_time_ms/2,
     cw_size/1,
     update_last_seen/4,
     prune_expired_last_seen/2
@@ -45,7 +46,8 @@
     node_info :: map() | undefined,
     rolling_packet_id :: non_neg_integer(),
     last_seen = #{} :: map(),
-    tx_queue = [] :: [tx_intent()]
+    tx_queue = [] :: [tx_intent()],
+    slot_time_ms = 28 :: pos_integer()
 }).
 
 -opaque core_state() :: #core{}.
@@ -96,22 +98,20 @@
 %% so a weakly-heard (far) packet relays first -> range extension. We are role
 %% CLIENT, hence the non-router branch (with the 2*CWmax*slot floor).
 %%
-%% TODO: the constants below are HARDCODED for SF9/BW250 medium-fast config.
-%% They must be revisited whenever the modulation / preset changes.
-%% ?REBROADCAST_SLOT_MS especially: the slot is a function of
-%% SF/BW, so it changes with every preset. Eventually these should be computed
-%% from the active radio config instead of living here as literals.
-%%
-%% Slot = airtime of one CAD / back-off unit:
-%%   max(2.25, NUM_SYM_CAD+0.5) * 2^SF/BW + 7.6 ms
+%% The slot is a function of the modulation, so init/2 derives it from the
+%% `spreading_factor` + `bandwidth_hz` opts via slot_time_ms/2, the same way
+%% the meshtastic mainline firmware does:
+%%   2.5 * 2^SF/BW + 7.6 ms
 %% Examples (BW250):
 %%   SF9  -> 2.5 * 2.048 + 7.6 ~= 13 ms
 %%   SF11 -> 2.5 * 8.192 + 7.6 ~= 28 ms
+%% ?DEFAULT_SLOT_TIME_MS is the fallback when the opts are absent/invalid; it
+%% matches the live SF11/BW250 eu_433 long-fast preset.
 -define(CW_MIN, 3).
 -define(CW_MAX, 8).
 -define(SNR_MIN, -20).
 -define(SNR_MAX, 10).
--define(REBROADCAST_SLOT_MS, 13).
+-define(DEFAULT_SLOT_TIME_MS, 28).
 
 -define(ROUTE_SIZE, 8).
 -define(NODENUM_BROADCAST, 16#FFFFFFFF).
@@ -127,13 +127,20 @@ init(MeshtasticOpts, InitialRolling) ->
     NodeInfo = proplists:get_value(node_info, MeshtasticOpts),
     Channel = init_channel(proplists:get_value(channel, MeshtasticOpts)),
     PrivateKey = proplists:get_value(private_key, MeshtasticOpts),
-    ?MESH_TRACE("[mesh] init node_id=~p initial_rolling=~p~n", [NodeId, InitialRolling]),
+    SlotTimeMs = slot_time_ms(
+        proplists:get_value(spreading_factor, MeshtasticOpts),
+        proplists:get_value(bandwidth_hz, MeshtasticOpts)
+    ),
+    ?MESH_TRACE("[mesh] init node_id=~p initial_rolling=~p slot_time_ms=~p~n", [
+        NodeId, InitialRolling, SlotTimeMs
+    ]),
     Core = #core{
         node_id = NodeId,
         channel = Channel,
         private_key = PrivateKey,
         node_info = NodeInfo,
-        rolling_packet_id = InitialRolling
+        rolling_packet_id = InitialRolling,
+        slot_time_ms = SlotTimeMs
     },
     {Core, [{set_timer, ?INITIAL_PERIODIC_MS, periodic}]}.
 
@@ -405,7 +412,7 @@ enqueue_rebroadcast(
                 encrypted_data := EncData
             }),
             Snr = maps:get(snr, Attributes, undefined),
-            Delay = rebroadcast_delay_ms(Snr, maps:get(rand22, Env)),
+            Delay = rebroadcast_delay_ms(Snr, maps:get(rand22, Env), Core#core.slot_time_ms),
             NotBefore = maps:get(now_ms, Env) + Delay,
             ?MESH_TRACE(
                 "[mesh] rebroadcast pid=~p hop=~p->~p next_hop=~p relay=~p snr=~p in ~pms~n",
@@ -668,12 +675,19 @@ backoff_ms(Attempts, Rand) ->
     Window = ?TX_BACKOFF_BASE_MS bsl min(Attempts, ?TX_BACKOFF_MAX_SHIFT),
     Rand rem Window.
 
--spec rebroadcast_delay_ms(integer() | undefined, non_neg_integer()) -> non_neg_integer().
-rebroadcast_delay_ms(Snr, Rand) ->
+-spec rebroadcast_delay_ms(integer() | undefined, non_neg_integer(), pos_integer()) ->
+    non_neg_integer().
+rebroadcast_delay_ms(Snr, Rand, SlotMs) ->
     CWsize = cw_size(Snr),
-    Offset = 2 * ?CW_MAX * ?REBROADCAST_SLOT_MS,
+    Offset = 2 * ?CW_MAX * SlotMs,
     Window = 1 bsl CWsize,
-    Offset + (Rand rem Window) * ?REBROADCAST_SLOT_MS.
+    Offset + (Rand rem Window) * SlotMs.
+
+-spec slot_time_ms(term(), term()) -> pos_integer().
+slot_time_ms(Sf, BwHz) when is_integer(Sf), is_integer(BwHz), BwHz > 0 ->
+    round(2.5 * (1 bsl Sf) * 1000 / BwHz + 7.6);
+slot_time_ms(_Sf, _BwHz) ->
+    ?DEFAULT_SLOT_TIME_MS.
 
 -spec cw_size(integer() | undefined) -> non_neg_integer().
 cw_size(Snr) when is_integer(Snr) ->
