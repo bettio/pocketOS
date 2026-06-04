@@ -37,6 +37,9 @@
 %% gen_statem
 -export([init/1, waiting_to_receive/3, waiting_tx_done/3, terminate/3]).
 
+%% Pure helpers, exported for tests
+-export([channel_windows/1, classify_channel_activity/4]).
+
 % -define(TRACE_ENABLED, true).
 -include_lib("trace.hrl").
 
@@ -80,7 +83,10 @@ sleep(Lora) ->
     config,
     irq,
     busy_pin,
-    pending
+    pending,
+    preamble_window_ms,
+    max_packet_ms,
+    rx_activity_start = 0
 }).
 
 %% @hidden
@@ -103,11 +109,18 @@ init(Config) ->
 
                     erlang:send_after(?AGC_RESET_INTERVAL_MS, self(), agc_reset),
 
+                    {PreambleWindowMs, MaxPacketMs} = channel_windows(Config),
+                    ?TRACE("channel guard: preamble_window=~pms max_packet=~pms", [
+                        PreambleWindowMs, MaxPacketMs
+                    ]),
+
                     State = #state{
                         spi = SPI,
                         config = Config,
                         irq = maps:get(irq, Config, undefined),
-                        busy_pin = BusyPin
+                        busy_pin = BusyPin,
+                        preamble_window_ms = PreambleWindowMs,
+                        max_packet_ms = MaxPacketMs
                     },
                     {ok, waiting_to_receive, State};
                 LoraError ->
@@ -142,18 +155,18 @@ waiting_to_receive(info, agc_reset, State) ->
     erlang:send_after(?AGC_RESET_INTERVAL_MS, self(), agc_reset),
     {next_state, waiting_to_receive, State};
 waiting_to_receive({call, From}, {broadcast, Message}, State) ->
-    case wait_channel_free(State#state.spi, State#state.busy_pin) of
-        ok ->
-            case do_broadcast(State#state.spi, State#state.config, Message) of
+    case wait_channel_free(State) of
+        {ok, State1} ->
+            case do_broadcast(State1#state.spi, State1#state.config, Message) of
                 ok ->
-                    {next_state, waiting_tx_done, State#state{pending = From}, [
+                    {next_state, waiting_tx_done, State1#state{pending = From}, [
                         {state_timeout, 9000, {error, tx_timeout}}
                     ]};
                 Error ->
-                    {next_state, waiting_to_receive, State, [{reply, From, Error}]}
+                    {next_state, waiting_to_receive, State1, [{reply, From, Error}]}
             end;
-        Error ->
-            {next_state, waiting_to_receive, State, [{reply, From, Error}]}
+        {Error, State1} ->
+            {next_state, waiting_to_receive, State1, [{reply, From, Error}]}
     end;
 waiting_to_receive({call, From}, sleep, State) ->
     do_sleep(State#state.spi),
@@ -398,22 +411,89 @@ do_broadcast(SPI, Config, Data) ->
     end.
 
 %% @private
-wait_channel_free(SPI, BusyPin) ->
+%% Channel clear check before TX. The preamble/header IRQ flags latch until the
+%% next receive or mode reset clears them, so a single noise blip would
+%% otherwise read as "busy" for up to a full AGC interval; expire them by age
+%% instead (as meshtastic handles false detections).
+wait_channel_free(State) ->
+    #state{spi = SPI, busy_pin = BusyPin} = State,
     case maybe_wait_until_not_busy(BusyPin, 100) of
         ok ->
             IRQFlags = sx126x_cmd:get_irq_status(SPI),
-            case
-                lists:member(preamble_detected, IRQFlags) orelse
-                    lists:member(header_valid, IRQFlags)
-            of
-                true ->
-                    {error, channel_busy};
-                false ->
-                    ok
+            NowMs = erlang:monotonic_time(millisecond),
+            Windows = {State#state.preamble_window_ms, State#state.max_packet_ms},
+            {Verdict, Reason, ActivityStart} =
+                classify_channel_activity(IRQFlags, NowMs, State#state.rx_activity_start, Windows),
+            ?TRACE("channel check: flags=~p verdict=~p (~p) age=~pms", [
+                IRQFlags, Verdict, Reason, activity_age(NowMs, State#state.rx_activity_start)
+            ]),
+            NewState = State#state{rx_activity_start = ActivityStart},
+            case Verdict of
+                busy -> {{error, channel_busy}, NewState};
+                free -> {ok, NewState}
             end;
         Error ->
-            Error
+            {Error, State}
     end.
+
+%% @doc Decide whether latched RX IRQ flags mean a reception is in progress.
+%% A preamble flag with no header is trusted for PreambleWindowMs, a header
+%% flag for MaxPacketMs; older flags are stale and read as free.
+%% Returns {free | busy, Reason, NewActivityStart}.
+-spec classify_channel_activity(
+    [atom()], integer(), integer(), {pos_integer(), pos_integer()}
+) -> {free | busy, atom(), integer()}.
+classify_channel_activity(IRQFlags, NowMs, ActivityStart, {PreambleWindowMs, MaxPacketMs}) ->
+    HeaderValid = lists:member(header_valid, IRQFlags),
+    case HeaderValid orelse lists:member(preamble_detected, IRQFlags) of
+        false ->
+            {free, idle, 0};
+        true when ActivityStart =:= 0 ->
+            {busy, activity_detected, NowMs};
+        true ->
+            Age = NowMs - ActivityStart,
+            if
+                Age =< PreambleWindowMs -> {busy, receiving_preamble, ActivityStart};
+                not HeaderValid -> {free, false_preamble, 0};
+                Age =< MaxPacketMs -> {busy, receiving_packet, ActivityStart};
+                true -> {free, false_header, 0}
+            end
+    end.
+
+%% @doc Activity-guard windows from the modulation config: twice the preamble
+%% airtime, and the airtime of a max-size frame.
+-spec channel_windows(map()) -> {pos_integer(), pos_integer()}.
+channel_windows(Config) ->
+    Sf = sf_numeric(maps:get(spreading_factor, Config, sf_7)),
+    BwHz = maps:get(bandwidth_hz, Config, 125000),
+    PreambleLen = maps:get(preamble_length, Config, 8),
+    TSymMs = (1 bsl Sf) * 1000 / BwHz,
+    TPreambleMs = (PreambleLen + 4.25) * TSymMs,
+    {max(trunc(2 * TPreambleMs), 1), max(packet_toa_ms(?MAX_PACKET_LEN, Config), 1)}.
+
+%% @private
+%% LoRa time-on-air (ms) of a TotalBytes frame under the configured modulation
+%% (the standard formula, like meshtastic_server_core:packet_airtime_ms/2).
+packet_toa_ms(TotalBytes, Config) ->
+    Sf = sf_numeric(maps:get(spreading_factor, Config, sf_7)),
+    BwHz = maps:get(bandwidth_hz, Config, 125000),
+    Cr = cr_numeric(maps:get(coding_rate, Config, cr_4_5)),
+    PreambleLen = maps:get(preamble_length, Config, 8),
+    TSymMs = (1 bsl Sf) * 1000 / BwHz,
+    LowDataOpt =
+        case TSymMs > 16.0 of
+            true -> 1;
+            false -> 0
+        end,
+    TPreambleMs = (PreambleLen + 4.25) * TSymMs,
+    Num = 8 * TotalBytes - 4 * Sf + 28 + 16,
+    Den = 4 * (Sf - 2 * LowDataOpt),
+    NPayload = 8 + max(ceil(Num / Den) * Cr, 0),
+    trunc(TPreambleMs + NPayload * TSymMs).
+
+%% @private
+activity_age(_NowMs, 0) -> 0;
+activity_age(NowMs, StartMs) -> NowMs - StartMs.
 
 %%%
 %%% receive
@@ -570,6 +650,13 @@ sf_numeric(sf_10) -> 10;
 sf_numeric(sf_11) -> 11;
 sf_numeric(sf_12) -> 12;
 sf_numeric(N) when is_integer(N) -> N.
+
+%% @private
+cr_numeric(cr_4_5) -> 5;
+cr_numeric(cr_4_6) -> 6;
+cr_numeric(cr_4_7) -> 7;
+cr_numeric(cr_4_8) -> 8;
+cr_numeric(N) when is_integer(N) -> N.
 
 %% @private
 do_sleep(SPI) ->
