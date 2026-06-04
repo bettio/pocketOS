@@ -19,7 +19,9 @@
     start_link/3,
     handle_payload/4,
     send/3,
-    send/4
+    send/4,
+    send_async/3,
+    send_async/4
 ]).
 
 -export([
@@ -51,6 +53,19 @@ send(Server, DestAddr, Data) ->
 
 send(Server, DestAddr, Data, Opts) ->
     gen_server:call(Server, {send, DestAddr, Data, Opts}).
+
+%% Delivery-tracked send/4: replies {ok, Ref} and later sends the caller a
+%% {delivery_update, Ref, meshtastic_server_core:delivery_status()} message.
+%% TODO: process aliases (missing on AtomVM) would let a gone caller opt out.
+-spec send_async(gen_server:server_ref(), non_neg_integer(), binary()) ->
+    {ok, reference()} | {error, term()}.
+send_async(Server, DestAddr, Data) ->
+    send_async(Server, DestAddr, Data, #{}).
+
+-spec send_async(gen_server:server_ref(), non_neg_integer(), binary(), map()) ->
+    {ok, reference()} | {error, term()}.
+send_async(Server, DestAddr, Data, Opts) ->
+    gen_server:call(Server, {send_async, DestAddr, Data, Opts}).
 
 init([Radio, MeshtasticOpts]) ->
     Callbacks = proplists:get_value(callbacks, MeshtasticOpts),
@@ -98,6 +113,24 @@ handle_call(
             ?MESH_TRACE("[mesh] send aborted dest=~p reason=~p~n", [DestAddr, _Reason]),
             {reply, Error, State}
     end;
+handle_call(
+    {send_async, DestAddr, Data, Opts},
+    {Pid, _Tag},
+    #state{callbacks = Callbacks, core = Core0} = State
+) ->
+    case prepare_send_env(DestAddr, Opts, Callbacks, Core0) of
+        {ok, Env} ->
+            Ref = make_ref(),
+            {ok, Core1, Effects} = meshtastic_server_core:handle_send(
+                DestAddr, Data, Env#{notify => {Pid, Ref}}, Core0
+            ),
+            run_effects(Effects, Callbacks),
+            State1 = pump_tx(State#state{core = Core1}),
+            {reply, {ok, Ref}, State1};
+        {error, _Reason} = Error ->
+            ?MESH_TRACE("[mesh] send_async aborted dest=~p reason=~p~n", [DestAddr, _Reason]),
+            {reply, Error, State}
+    end;
 handle_call(_Msg, _From, State) ->
     {reply, error, State}.
 
@@ -112,6 +145,11 @@ handle_info(periodic, #state{callbacks = Callbacks, core = Core0} = State) ->
     {noreply, State1};
 handle_info(tx_pump, State) ->
     {noreply, pump_tx(State)};
+handle_info({ack_timeout, PacketId}, #state{callbacks = Callbacks, core = Core0} = State) ->
+    {Core1, Effects} = meshtastic_server_core:handle_ack_timeout(PacketId, Core0),
+    run_effects(Effects, Callbacks),
+    State1 = pump_tx(State#state{core = Core1}),
+    {noreply, State1};
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -129,6 +167,9 @@ run_effects([{learn, NodeId, NextHop} | Rest], Callbacks) ->
     run_effects(Rest, Callbacks);
 run_effects([{set_timer, Ms, Msg} | Rest], Callbacks) ->
     erlang:send_after(Ms, self(), Msg),
+    run_effects(Rest, Callbacks);
+run_effects([{notify, {Pid, Ref}, Status} | Rest], Callbacks) ->
+    Pid ! {delivery_update, Ref, Status},
     run_effects(Rest, Callbacks).
 
 deliver(undefined, _DecodedPacket) ->

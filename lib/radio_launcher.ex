@@ -69,7 +69,9 @@ defmodule RadioLauncher do
            channel: channel,
            private_key: private_key,
            spreading_factor: Map.fetch!(complete_config, :spreading_factor),
-           bandwidth_hz: Map.fetch!(complete_config, :bandwidth_hz)
+           bandwidth_hz: Map.fetch!(complete_config, :bandwidth_hz),
+           coding_rate: Map.fetch!(complete_config, :coding_rate),
+           preamble_length: Map.fetch!(complete_config, :preamble_length)
          ]}
       ])
   end

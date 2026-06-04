@@ -68,6 +68,13 @@ defmodule MeshtasticServerCoreTest do
     Enum.map(intents, & &1.payload)
   end
 
+  # Like drain/1 but also returns the drained core, for tests that keep acting
+  # on the state after consuming the queued intents.
+  defp drain_core(core) do
+    {intents, core2} = :meshtastic_server_core.take_due(core, 1_000_000)
+    {Enum.map(intents, & &1.payload), core2}
+  end
+
   defp decode_wire(wire) do
     {:ok, p} = :meshtastic.parse(wire)
     msg = p |> :meshtastic.decrypt(psk()) |> Map.fetch!(:data) |> :meshtastic_proto.decode()
@@ -287,13 +294,70 @@ defmodule MeshtasticServerCoreTest do
     assert msg.request_id == @orig_pid
   end
 
-  test "we do not ack a packet that is itself an ack" do
+  test "a directly-heard want_ack ack gets a 0-hop ack-the-ack, not a full ack" do
+    # meshtastic sends text-DM acks as reliable want_ack packets; the 0-hop
+    # answer stops the peer's ack retransmissions and terminates the chain
     routing =
       %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: 0x55}
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
     packet = rx_packet(%{dest: @us, want_ack: true, data: routing})
+    {:ok, core2, effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    # the 0-hop ack is itself untracked: no ack-timeout timer armed
+    refute Enum.any?(effects, &match?({:set_timer, _, {:ack_timeout, _}}, &1))
+
+    assert [ack] = drain(core2)
+    {p, msg} = decode_wire(ack)
+    assert p.dest == @peer
+    assert p.hop_start == 0
+    assert p.hop_limit == 0
+    assert p.want_ack == false
+    assert msg.portnum == :ROUTING_APP
+    assert msg.request_id == @orig_pid
+  end
+
+  test "a relayed want_ack ack not addressed through us is not acked at all" do
+    routing =
+      %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: 0x55}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    packet =
+      rx_packet(%{dest: @us, want_ack: true, hop_start: 3, hop_limit: 2, data: routing})
+
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+    assert drain(core2) == []
+  end
+
+  test "a relayed want_ack ack that named us as next hop still gets the 0-hop ack" do
+    our_byte = :meshtastic.relay_node_byte(@us)
+
+    routing =
+      %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: 0x55}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    packet =
+      rx_packet(%{
+        dest: @us,
+        want_ack: true,
+        hop_start: 3,
+        hop_limit: 2,
+        next_hop: our_byte,
+        data: routing
+      })
+
+    {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [ack] = drain(core2)
+    {p, _msg} = decode_wire(ack)
+    assert p.hop_limit == 0
+  end
+
+  test "a plain (no want_ack) ack is not acked" do
+    packet = rx_packet(%{dest: @us, data: routing_ack_data(0x55)})
     {:ok, core2, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
     assert drain(core2) == []
   end
@@ -417,7 +481,7 @@ defmodule MeshtasticServerCoreTest do
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
-    packet = rx_packet(%{dest: @us, want_ack: true, data: data})
+    packet = rx_packet(%{dest: @us, data: data})
     {:ok, core2, _effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
     assert drain(core2) == []
   end
@@ -849,6 +913,302 @@ defmodule MeshtasticServerCoreTest do
     assert p.dest == @peer
     assert p.channel_hash == channel_hash()
     assert :meshtastic.decrypt(p, psk()) |> Map.fetch!(:data) == text_data("dm")
+  end
+
+  # ---- delivery tracking (Env.notify / send_async sends) ----
+
+  defp tracked_send(dest, data, extra \\ %{}) do
+    ref = make_ref()
+
+    {:ok, core2, effects} =
+      :meshtastic_server_core.handle_send(
+        dest,
+        data,
+        env(Map.merge(%{notify: {self(), ref}}, extra)),
+        core()
+      )
+
+    {ref, core2, effects}
+  end
+
+  test "a tracked send carries want_ack on the wire and arms the ack timer" do
+    {_ref, core2, effects} = tracked_send(@broadcast, text_data("hi"))
+
+    assert [{:set_timer, interval, {:ack_timeout, pid}}] = effects
+    assert interval > 4500
+
+    assert [wire] = drain(core2)
+    {p, _} = decode_wire(wire)
+    assert p.want_ack == true
+    assert p.dest == @broadcast
+    assert p.packet_id == pid
+  end
+
+  test "a tracked unicast also carries want_ack (broadcast and DM alike)" do
+    {_ref, core2, effects} = tracked_send(@peer, text_data("dm"))
+    assert [{:set_timer, _, {:ack_timeout, _}}] = effects
+
+    assert [wire] = drain(core2)
+    {p, _} = decode_wire(wire)
+    assert p.dest == @peer
+    assert p.want_ack == true
+  end
+
+  test "an untracked send keeps want_ack clear and an ack_timeout for it is a stale no-op" do
+    {:ok, core2, []} = :meshtastic_server_core.handle_send(@peer, text_data("dm"), env(), core())
+
+    assert [wire] = drain(core2)
+    {p, _} = decode_wire(wire)
+    assert p.want_ack == false
+
+    assert {core3, []} = :meshtastic_server_core.handle_ack_timeout(p.packet_id, core2)
+    assert drain(core3) == [wire]
+  end
+
+  test "an explicit ROUTING ack resolves a tracked DM with a delivery notify" do
+    {ref, core2, _} = tracked_send(@peer, text_data("dm"))
+    [wire] = drain(core2)
+    {p, _} = decode_wire(wire)
+
+    ack = rx_packet(%{dest: @us, data: routing_ack_data(p.packet_id)})
+    {:ok, core3, effects} = :meshtastic_server_core.handle_rx(ack, @attrs, env(), core2)
+
+    assert {:notify, {_pid, ^ref}, {:ack, %{implicit: false, src: @peer}}} =
+             Enum.find(effects, &match?({:notify, _, _}, &1))
+
+    assert Enum.any?(effects, &match?({:deliver, _}, &1))
+
+    # resolved: a late timer is a stale no-op, nothing retransmitted
+    assert {core4, []} = :meshtastic_server_core.handle_ack_timeout(p.packet_id, core3)
+    assert drain(core4) == []
+  end
+
+  test "a peer ROUTING NAK resolves a tracked DM as failed with its reason" do
+    {ref, core2, _} = tracked_send(@peer, text_data("dm"))
+    [wire] = drain(core2)
+    {p, _} = decode_wire(wire)
+
+    nak_data =
+      %{
+        portnum: :ROUTING_APP,
+        payload: %{error_reason: :PKI_UNKNOWN_PUBKEY},
+        request_id: p.packet_id
+      }
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    nak = rx_packet(%{dest: @us, data: nak_data})
+    {:ok, _core3, effects} = :meshtastic_server_core.handle_rx(nak, @attrs, env(), core2)
+
+    assert {:notify, {_pid, ^ref}, {:nak, :PKI_UNKNOWN_PUBKEY}} =
+             Enum.find(effects, &match?({:notify, _, _}, &1))
+  end
+
+  test "any reply carrying our request_id counts as the ack (reply-as-ack)" do
+    {ref, core2, _} = tracked_send(@peer, traceroute_request_data())
+    [wire] = drain(core2)
+    {p, _} = decode_wire(wire)
+
+    reply_data =
+      %{portnum: :TRACEROUTE_APP, payload: %{snr_towards: [24]}, request_id: p.packet_id}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    reply = rx_packet(%{dest: @us, data: reply_data})
+    {:ok, _core3, effects} = :meshtastic_server_core.handle_rx(reply, @attrs, env(), core2)
+
+    assert {:notify, {_pid, ^ref}, {:ack, %{implicit: false}}} =
+             Enum.find(effects, &match?({:notify, _, _}, &1))
+  end
+
+  test "an ack for someone else's packet does not resolve a tracked send" do
+    {_ref, core2, _} = tracked_send(@peer, text_data("dm"))
+    [_wire] = drain(core2)
+
+    ack = rx_packet(%{dest: @us, data: routing_ack_data(0x12345)})
+    {:ok, _core3, effects} = :meshtastic_server_core.handle_rx(ack, @attrs, env(), core2)
+    refute Enum.any?(effects, &match?({:notify, _, _}, &1))
+  end
+
+  test "hearing our tracked packet rebroadcast is the implicit ack and cancels queued TX" do
+    {ref, core2, _} = tracked_send(@broadcast, text_data("hi"))
+
+    # peek at the queued intent (not draining core2): it is tagged for cancel
+    {[intent], _peek} = :meshtastic_server_core.take_due(core2, 1_000_000)
+    assert {@us, pid} = intent.ref
+
+    echo = rx_packet(%{src: @us, packet_id: pid})
+    {:discard, core3, effects} = :meshtastic_server_core.handle_rx(echo, @attrs, env(), core2)
+
+    assert [{:notify, {_pid, ^ref}, {:ack, %{implicit: true}}}] = effects
+    # the still-queued copy was cancelled along with the pending entry
+    assert drain(core3) == []
+    assert {_core4, []} = :meshtastic_server_core.handle_ack_timeout(pid, core3)
+  end
+
+  test "a foreign packet reusing our node id is still discarded without effects" do
+    packet = rx_packet(%{src: @us})
+    c = core()
+    assert {:discard, ^c, []} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), c)
+  end
+
+  test "the ack timeout retransmits twice (flood fallback on the last DM retry) then naks" do
+    {ref, core2, [{:set_timer, _, {:ack_timeout, pid}}]} =
+      tracked_send(@peer, text_data("dm"), %{routes: %{@peer => 0x42}})
+
+    {[wire1], core2b} = drain_core(core2)
+    {:ok, p1} = :meshtastic.parse(wire1)
+    assert p1.packet_id == pid
+    assert p1.next_hop == 0x42
+
+    # 1st timeout: byte-identical retransmission, timer re-armed
+    {core3, [{:set_timer, _, {:ack_timeout, ^pid}}]} =
+      :meshtastic_server_core.handle_ack_timeout(pid, core2b)
+
+    {[^wire1], core3b} = drain_core(core3)
+
+    # 2nd timeout: the last retry falls back to flooding (next_hop cleared,
+    # ciphertext untouched)
+    {core4, [{:set_timer, _, {:ack_timeout, ^pid}}]} =
+      :meshtastic_server_core.handle_ack_timeout(pid, core3b)
+
+    {[wire2], core4b} = drain_core(core4)
+    {:ok, p2} = :meshtastic.parse(wire2)
+    assert p2.packet_id == pid
+    assert p2.next_hop == 0
+    assert p2.encrypted_data == p1.encrypted_data
+
+    # 3rd timeout: retries exhausted
+    {core5, effects} = :meshtastic_server_core.handle_ack_timeout(pid, core4b)
+    assert [{:notify, {_pid, ^ref}, {:nak, :MAX_RETRANSMIT}}] = effects
+    assert drain(core5) == []
+    assert {_core6, []} = :meshtastic_server_core.handle_ack_timeout(pid, core5)
+  end
+
+  test "a tracked broadcast retransmits as a flood and gives up with MAX_RETRANSMIT" do
+    {ref, core2, [{:set_timer, _, {:ack_timeout, pid}}]} =
+      tracked_send(@broadcast, text_data("hi"))
+
+    {[wire1], core2b} = drain_core(core2)
+
+    {core3, _} = :meshtastic_server_core.handle_ack_timeout(pid, core2b)
+    {[^wire1], core3b} = drain_core(core3)
+    {core4, _} = :meshtastic_server_core.handle_ack_timeout(pid, core3b)
+    {[^wire1], core4b} = drain_core(core4)
+
+    {core5, effects} = :meshtastic_server_core.handle_ack_timeout(pid, core4b)
+    assert [{:notify, {_pid, ^ref}, {:nak, :MAX_RETRANSMIT}}] = effects
+    assert drain(core5) == []
+  end
+
+  test "an inbound want_ack text DM is acked reliably (tracked want_ack ack)" do
+    packet = rx_packet(%{dest: @us, want_ack: true, data: text_data("ping")})
+    {:ok, core2, effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    assert [{:set_timer, _, {:ack_timeout, ack_pid}}] =
+             Enum.filter(effects, &match?({:set_timer, _, {:ack_timeout, _}}, &1))
+
+    assert [ack] = drain(core2)
+    {p, msg} = decode_wire(ack)
+    assert p.want_ack == true
+    assert p.packet_id == ack_pid
+    assert msg.portnum == :ROUTING_APP
+    assert msg.request_id == @orig_pid
+
+    # the peer's 0-hop terminator resolves it silently: no notify effect, and
+    # the armed timer becomes a stale no-op
+    term =
+      rx_packet(%{
+        dest: @us,
+        packet_id: 0x777,
+        hop_start: 0,
+        hop_limit: 0,
+        data: routing_ack_data(ack_pid)
+      })
+
+    {:ok, core3, effects2} = :meshtastic_server_core.handle_rx(term, @attrs, env(), core2)
+    refute Enum.any?(effects2, &match?({:notify, _, _}, &1))
+    assert {_core4, []} = :meshtastic_server_core.handle_ack_timeout(ack_pid, core3)
+  end
+
+  test "a non-text want_ack packet gets a plain untracked ack" do
+    packet = rx_packet(%{dest: @us, want_ack: true, data: nodeinfo_data([])})
+    {:ok, core2, effects} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+
+    refute Enum.any?(effects, &match?({:set_timer, _, {:ack_timeout, _}}, &1))
+
+    assert [ack] = drain(core2)
+    {p, msg} = decode_wire(ack)
+    assert msg.portnum == :ROUTING_APP
+    assert p.want_ack == false
+  end
+
+  test "a directly-heard duplicate of a want_ack DM to us is re-acked 0-hop" do
+    packet = rx_packet(%{dest: @us, want_ack: true, data: text_data("ping")})
+    {:ok, core1, _} = :meshtastic_server_core.handle_rx(packet, @attrs, env(), core())
+    {[_first_ack], core1b} = drain_core(core1)
+
+    {:discard, core2, []} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(%{now_ms: 1001}), core1b)
+
+    assert [re_ack] = drain(core2)
+    {p, msg} = decode_wire(re_ack)
+    assert p.hop_limit == 0
+    assert p.want_ack == false
+    assert msg.portnum == :ROUTING_APP
+    assert msg.request_id == @orig_pid
+  end
+
+  test "relayed, broadcast or no-want_ack duplicates are not re-acked" do
+    # a relayed retry (hops taken > 0) is not ours to re-ack
+    relayed = rx_packet(%{dest: @us, want_ack: true, hop_start: 3, hop_limit: 2})
+    {:ok, c1, _} = :meshtastic_server_core.handle_rx(relayed, @attrs, env(), core())
+    {_, c1b} = drain_core(c1)
+
+    {:discard, c2, []} =
+      :meshtastic_server_core.handle_rx(relayed, @attrs, env(%{now_ms: 1001}), c1b)
+
+    assert drain(c2) == []
+
+    # a want_ack broadcast duplicate is never acked
+    bcast = rx_packet(%{dest: @broadcast, want_ack: true})
+    {:ok, c3, _} = :meshtastic_server_core.handle_rx(bcast, @attrs, env(), core())
+    {_, c3b} = drain_core(c3)
+
+    {:discard, c4, []} =
+      :meshtastic_server_core.handle_rx(bcast, @attrs, env(%{now_ms: 1001}), c3b)
+
+    assert drain(c4) == []
+
+    # a duplicate without want_ack keeps the old silent-discard behaviour
+    plain = rx_packet(%{dest: @us})
+    {:ok, c5, _} = :meshtastic_server_core.handle_rx(plain, @attrs, env(), core())
+    {_, c5b} = drain_core(c5)
+
+    {:discard, c6, []} =
+      :meshtastic_server_core.handle_rx(plain, @attrs, env(%{now_ms: 1001}), c5b)
+
+    assert drain(c6) == []
+  end
+
+  # ---- airtime / retransmission interval ----
+
+  test "packet_airtime_ms and retransmission_ms mirror the meshtastic timing" do
+    # SF11/BW250 (the live preset defaults): Tsym 8.192 ms, preamble 165.9 ms
+    c11 = core()
+    assert :meshtastic_server_core.packet_airtime_ms(65, c11) == 722
+    # 49-byte wire frame: 2*airtime(49+16) + 56 slots * 28 ms + 4500 ms
+    assert :meshtastic_server_core.retransmission_ms(49, c11) == 7512
+
+    # SF9/BW250 (medium fast): Tsym 2.048 ms, slot 13 ms
+    c9 = core(spreading_factor: 9, bandwidth_hz: 250_000)
+    assert :meshtastic_server_core.packet_airtime_ms(65, c9) == 211
+    assert :meshtastic_server_core.retransmission_ms(49, c9) == 5650
+
+    # the tracked-send interval is the wire-size-derived one
+    {_ref, _core2, [{:set_timer, interval, _}]} = tracked_send(@broadcast, text_data("hi"))
+    wire_bytes = 16 + byte_size(text_data("hi"))
+    assert interval == :meshtastic_server_core.retransmission_ms(wire_bytes, c11)
   end
 
   # ---- handle_periodic ----

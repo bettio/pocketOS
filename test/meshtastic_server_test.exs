@@ -748,6 +748,187 @@ defmodule MeshtasticServerTest do
     Process.unregister(:meshtastic_server_tester)
   end
 
+  test "send_async reports an implicit ack when the broadcast is heard rebroadcast" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: 0xDEADCAFE
+      )
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "anyone?"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    {:ok, ref} = :meshtastic_server.send_async(server, 0xFFFFFFFF, data)
+
+    wire =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("tracked broadcast was never transmitted")
+      end
+
+    {:ok, p} = :meshtastic.parse(wire)
+    assert p.want_ack == true
+
+    # hearing our own packet again (a peer's rebroadcast) is the implicit ack
+    iface = {:mock, :undefined}
+    :discard = :meshtastic_server.handle_payload(server, iface, wire, %{rssi: -30, snr: 5})
+
+    assert_receive {:delivery_update, ^ref, {:ack, %{implicit: true}}}, 5000
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "send_async reports delivery on the recipient's explicit ack" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    us = 0xDEADCAFE
+    peer = 0xAAAAAAAA
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: us
+      )
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "dm"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    {:ok, ref} = :meshtastic_server.send_async(server, peer, data)
+
+    wire =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("tracked DM was never transmitted")
+      end
+
+    {:ok, p} = :meshtastic.parse(wire)
+    assert p.dest == peer
+    assert p.want_ack == true
+
+    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+
+    ack_data =
+      %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: p.packet_id}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    ack_wire =
+      %{
+        dest: us,
+        src: peer,
+        packet_id: 0x0B0B0B0B,
+        hop_start: 3,
+        via_mqtt: false,
+        want_ack: false,
+        hop_limit: 3,
+        channel_hash: channel_hash,
+        next_hop: 0,
+        relay_node: 0,
+        data: ack_data
+      }
+      |> :meshtastic.encrypt(:meshtastic.default_long_fast_psk())
+      |> :meshtastic.serialize()
+
+    iface = {:mock, :undefined}
+    :ok = :meshtastic_server.handle_payload(server, iface, ack_wire, %{rssi: -28, snr: 11})
+
+    assert_receive {:delivery_update, ^ref, {:ack, %{implicit: false, src: ^peer}}}, 5000
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "send_async gives up with MAX_RETRANSMIT after the ack timeouts fire" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    peer = 0xAAAAAAAA
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: 0xDEADCAFE
+      )
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "lost dm"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    {:ok, ref} = :meshtastic_server.send_async(server, peer, data)
+
+    wire1 =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("tracked DM was never transmitted")
+      end
+
+    {:ok, p} = :meshtastic.parse(wire1)
+
+    # drive the (real ~7.5 s) ack timer by hand: two retransmissions...
+    send(server, {:ack_timeout, p.packet_id})
+
+    wire2 =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("expected the 1st retransmission")
+      end
+
+    assert wire2 == wire1
+
+    send(server, {:ack_timeout, p.packet_id})
+
+    _wire3 =
+      receive do
+        bin when is_binary(bin) -> bin
+      after
+        5000 -> flunk("expected the 2nd retransmission")
+      end
+
+    # ...then the give-up
+    send(server, {:ack_timeout, p.packet_id})
+    assert_receive {:delivery_update, ^ref, {:nak, :MAX_RETRANSMIT}}, 5000
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
+  test "send_async with pki refuses an unknown peer and never notifies" do
+    Process.register(self(), :meshtastic_server_tester)
+
+    {_our_pub, our_priv} = :crypto.generate_key(:eddh, :x25519)
+
+    data =
+      %{portnum: :TEXT_MESSAGE_APP, payload: "x"}
+      |> :meshtastic_proto.encode()
+      |> :erlang.iolist_to_binary()
+
+    {:ok, server} =
+      :meshtastic_server.start_link({TestRadio, TestRadio, self()},
+        callbacks: TestCallbacks,
+        node_id: 0xDEADCAFE,
+        private_key: our_priv
+      )
+
+    assert {:error, _} =
+             :meshtastic_server.send_async(server, 0xCCCCCCCC, data, %{pki: true})
+
+    refute_receive(_, 200)
+
+    :ok = :gen_server.stop(server)
+    Process.unregister(:meshtastic_server_tester)
+  end
+
   test "an incoming ACK is learned as a route and a later send to that node is directed" do
     Process.register(self(), :meshtastic_server_tester)
 
