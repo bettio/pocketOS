@@ -62,6 +62,7 @@ defmodule RadioLauncher do
 
     {:ok, _rm} =
       :radio_manager.start_link(complete_config, [
+        {{:local, :meshcore_server}, :meshcore_server, []},
         {{:local, :meshtastic_server}, :meshtastic_server,
          [
            callbacks: MeshtasticCallbacks,
