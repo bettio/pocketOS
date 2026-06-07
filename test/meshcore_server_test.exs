@@ -2,7 +2,8 @@ defmodule MeshcoreServerTest do
   use ExUnit.Case, async: true
 
   # Captured on-air frames: f1 (control discover_req), f8 (group text "testd: hello"),
-  # f4 (advert from node "testd").
+  # f4 (advert from node "testd"). Frame enrichment is covered in the core tests
+  # (meshcore_server_core_test); here we test the gen_server wiring + presentation.
   @control <<0x2E, 0x00, 0x80, 0xFF, 0xBC, 0xC7, 0x32, 0x10>>
   @grp_txt <<0x15, 0x00, 0x11, 0x58, 0x9A, 0x1E, 0x2D, 0x2F, 0x5C, 0xE4, 0x9A, 0xC1, 0x68, 0xF9,
              0xB3, 0x7E, 0x7F, 0xBD, 0x1A, 0xBD, 0xE2, 0xA1, 0x0F, 0x37, 0xA2, 0x24, 0xF5, 0x06,
@@ -29,44 +30,9 @@ defmodule MeshcoreServerTest do
     assert :meshcore_server.handle_payload(srv, iface, <<>>, attrs) == :next
   end
 
-  test "enrich decrypts group text in place: text added, ciphertext dropped" do
-    {:ok, pkt} = :meshcore_protocol.parse(@grp_txt)
-    enriched = :meshcore_server.enrich(pkt, channel_key())
-
-    assert enriched.text == "testd: hello"
-    assert enriched.timestamp == 1_672_533_147
-    refute Map.has_key?(enriched, :ciphertext)
-    refute Map.has_key?(enriched, :cipher_mac)
-  end
-
-  test "enrich attaches sig_ok to adverts and leaves the rest of the map intact" do
-    {:ok, pkt} = :meshcore_protocol.parse(@advert)
-    enriched = :meshcore_server.enrich(pkt, channel_key())
-
-    assert enriched.sig_ok == true
-    assert enriched.name == "testd"
-    # enrich does not trim; the bulky binaries survive for storage
-    assert Map.has_key?(enriched, :public_key)
-    assert Map.has_key?(enriched, :signature)
-  end
-
-  test "enrich passes non-decodable frame types through unchanged" do
-    {:ok, pkt} = :meshcore_protocol.parse(@control)
-    assert :meshcore_server.enrich(pkt, channel_key()) == pkt
-  end
-
-  test "enrich flags a group text it cannot decrypt and keeps the ciphertext" do
-    {:ok, pkt} = :meshcore_protocol.parse(@grp_txt)
-    enriched = :meshcore_server.enrich(pkt, <<0::128>>)
-
-    assert enriched.decrypt_error == :bad_mac
-    assert Map.has_key?(enriched, :ciphertext)
-    refute Map.has_key?(enriched, :text)
-  end
-
   test "for_log drops the bulky advert binaries but keeps the decoded fields" do
     {:ok, pkt} = :meshcore_protocol.parse(@advert)
-    logged = :meshcore_server.for_log(:meshcore_server.enrich(pkt, channel_key()))
+    logged = :meshcore_server.for_log(:meshcore_server_core.enrich(pkt, channel_key()))
 
     refute Map.has_key?(logged, :public_key)
     refute Map.has_key?(logged, :signature)
