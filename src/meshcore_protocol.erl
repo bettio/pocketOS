@@ -8,6 +8,8 @@
     encrypt/1,
     encrypt/2,
     verify_advert/1,
+    sign_advert/2,
+    encode_advert_appdata/1,
     eddsa_available/0,
     channel_hash/1,
     default_public_channel/0,
@@ -129,6 +131,13 @@ take_advert_name(1, Name, Adv) ->
     Adv#{name => Name};
 take_advert_name(_HasName, _Name, Adv) ->
     Adv.
+
+%% Build advert appdata: flags byte (node type | name-present) ++ name. Minimal
+%% inverse of parse_advert_appdata/2 -- node type and name only (no location or
+%% feature fields), which is all our own adverts carry.
+-spec encode_advert_appdata(map()) -> binary().
+encode_advert_appdata(#{node_type := NodeType, name := Name}) ->
+    <<1:1, 0:3, (node_type_to_int(NodeType)):4, Name/binary>>.
 
 %% control / discovery -- match the body shape in the head; Lo is the flags low nibble
 parse_control(16#8, Lo, <<TypeFilter, Tag:4/binary>>, _Payload, Base) ->
@@ -303,6 +312,15 @@ verify_advert(#{public_key := PubKey, timestamp := Timestamp, signature := Sig, 
 verify_advert(_Packet) ->
     false.
 
+%% Ed25519-sign an advert over public_key||timestamp||appdata, returning the
+%% packet with the `signature' filled in. Inverse of verify_advert/1; the signed
+%% bytes must stay byte-identical to it. Requires eddsa_available/0.
+-spec sign_advert(packet(), binary()) -> packet().
+sign_advert(#{public_key := PubKey, timestamp := Timestamp} = Packet, PrivKey) ->
+    AppData = maps:get(appdata, Packet, <<>>),
+    Msg = <<PubKey/binary, Timestamp:32/little-unsigned, AppData/binary>>,
+    Packet#{signature => crypto:sign(eddsa, none, Msg, [PrivKey, ed25519])}.
+
 %% Whether this runtime can do Ed25519 (needs libsodium; OpenSSL on the host).
 %% Advert verification and the PKI direct-message path depend on it.
 -spec eddsa_available() -> boolean().
@@ -367,6 +385,11 @@ node_type(2) -> repeater;
 node_type(3) -> room_server;
 node_type(4) -> sensor;
 node_type(N) -> {unknown, N}.
+
+node_type_to_int(chat) -> 1;
+node_type_to_int(repeater) -> 2;
+node_type_to_int(room_server) -> 3;
+node_type_to_int(sensor) -> 4.
 
 bool_to_int(false) -> 0;
 bool_to_int(true) -> 1.

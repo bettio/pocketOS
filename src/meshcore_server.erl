@@ -5,9 +5,10 @@
 %% Imperative gen_server layer around the functional core `meshcore_server_core'.
 %%
 %% Thin shell: it owns the gen_server process and its mailbox, the radio handle,
-%% and the clock. Each callback injects the impurity the core needs as data,
-%% calls one pure core function, and runs the returned effects. All packet logic
-%% lives in the core; see meshcore_server_core.erl.
+%% timers, the clock and randomness. Each callback injects the impurity the core
+%% needs as data, calls one pure core function, runs the returned effects, and
+%% pumps the core's tx_queue out to the radio. All packet logic lives in the
+%% core; see meshcore_server_core.erl.
 %%
 
 -export([
@@ -56,7 +57,8 @@ handle_call(
         {ok, Packet} ->
             {ok, Core1, Effects} = meshcore_server_core:handle_rx(Packet, Attributes, #{}, Core0),
             run_effects(Effects),
-            {reply, ok, State#state{core = Core1}};
+            State1 = pump_tx(State#state{core = Core1}),
+            {reply, ok, State1};
         _Invalid ->
             {reply, next, State}
     end;
@@ -66,6 +68,14 @@ handle_call(_Msg, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
+handle_info(periodic, #state{core = Core0} = State) ->
+    Env = #{wall_s => erlang:system_time(second)},
+    {Core1, Effects} = meshcore_server_core:handle_periodic(Env, Core0),
+    run_effects(Effects),
+    State1 = pump_tx(State#state{core = Core1}),
+    {noreply, State1};
+handle_info(tx_pump, State) ->
+    {noreply, pump_tx(State)};
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -75,9 +85,38 @@ handle_info(_Msg, State) ->
 
 run_effects([]) ->
     ok;
+run_effects([{set_timer, Ms, Msg} | Rest]) ->
+    erlang:send_after(Ms, self(), Msg),
+    run_effects(Rest);
 run_effects([{deliver, Packet} | Rest]) ->
     erlang:display({meshcore_rx, for_log(Packet)}),
     run_effects(Rest).
+
+pump_tx(#state{radio = {_RadioId, RadioModule, Radio}, core = Core0} = State) ->
+    Now = erlang:monotonic_time(millisecond),
+    case meshcore_server_core:take_one_due(Core0, Now) of
+        {none, Core1} ->
+            arm_tx_pump(Core1, Now),
+            State#state{core = Core1};
+        {#{payload := Payload} = Intent, Core1} ->
+            Result = RadioModule:broadcast(Radio, Payload),
+            NowAfter = erlang:monotonic_time(millisecond),
+            Env = #{mono_ms => NowAfter, rand22 => rand22()},
+            Core2 = meshcore_server_core:handle_tx_results([{Intent, Result}], Env, Core1),
+            arm_tx_pump(Core2, NowAfter),
+            State#state{core = Core2}
+    end.
+
+arm_tx_pump(Core, Now) ->
+    Delay =
+        case meshcore_server_core:has_due(Core, Now) of
+            true -> 0;
+            false -> meshcore_server_core:next_wakeup(Core, Now)
+        end,
+    case Delay of
+        infinity -> ok;
+        D -> erlang:send_after(D, self(), tx_pump)
+    end.
 
 %%------------------------------------------------------------------------------
 %% Presentation
@@ -87,3 +126,7 @@ run_effects([{deliver, Packet} | Rest]) ->
 %% from the core keeps them for storage.
 for_log(Packet) ->
     maps:remove(appdata, maps:remove(signature, maps:remove(public_key, Packet))).
+
+rand22() ->
+    <<TopRand:22, _:10>> = crypto:strong_rand_bytes(4),
+    TopRand.

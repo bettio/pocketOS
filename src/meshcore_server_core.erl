@@ -5,29 +5,63 @@
 %% Functional core for `meshcore_server'.
 %%
 %% Pure: no I/O, no clock, no randomness. The gen_server (`meshcore_server')
-%% calls one pure core function per event, runs the returned effects, and holds
-%% the state. Everything impure is injected as data through an `Env' map and
-%% everything to be done flows back out as an `Effects' list. Mirrors
-%% meshtastic_server_core.
+%% injects everything impure as data through an `Env' map (`wall_s' for the
+%% advert timestamp, `mono_ms' + `rand22' for the tx back-off) and runs the
+%% returned effects. Transmissions are appended to `tx_queue' in the returned
+%% state; other side effects (`set_timer', `deliver') flow back as an `Effects'
+%% list the gen_server runs.
 %%
+%% The node's only active job today is to
+%% broadcast a signed flood ADVERT every 60 s.
+%%
+
+-include_lib("mesh_trace.hrl").
 
 -export([
     init/1,
     handle_rx/4,
-    enrich/2
+    handle_periodic/2,
+    enrich/2,
+    take_due/2,
+    take_one_due/2,
+    has_due/2,
+    next_wakeup/2,
+    handle_tx_results/3
 ]).
 
 -export_type([core_state/0, effect/0, env/0]).
 
 -record(core, {
-    channel_key :: binary()
+    public_key :: binary() | undefined,
+    private_key :: binary() | undefined,
+    name :: binary() | undefined,
+    channel_key :: binary(),
+    tx_queue = [] :: [tx_intent()]
 }).
 
 -opaque core_state() :: #core{}.
 
--type effect() :: {deliver, Packet :: map()}.
+-type effect() ::
+    {deliver, Packet :: map()}
+    | {set_timer, Ms :: non_neg_integer(), Msg :: term()}.
 
--type env() :: #{}.
+-type env() :: #{
+    wall_s => non_neg_integer(),
+    mono_ms => integer(),
+    rand22 => non_neg_integer()
+}.
+
+-type tx_intent() :: #{
+    payload := binary(),
+    not_before := now | integer(),
+    attempts => non_neg_integer()
+}.
+
+-define(INITIAL_PERIODIC_MS, 500).
+-define(PERIODIC_MS, 60000).
+
+-define(TX_BACKOFF_BASE_MS, 250).
+-define(TX_BACKOFF_MAX_SHIFT, 4).
 
 %%------------------------------------------------------------------------------
 %% Construction
@@ -36,11 +70,23 @@
 -spec init(proplists:proplist()) -> {core_state(), [effect()]}.
 init(Opts) ->
     Core = #core{
+        public_key = proplists:get_value(public_key, Opts),
+        private_key = proplists:get_value(private_key, Opts),
+        name = proplists:get_value(name, Opts),
         channel_key = proplists:get_value(
             channel_key, Opts, meshcore_protocol:default_public_channel_key()
         )
     },
-    {Core, []}.
+    {Core, periodic_effects(Core)}.
+
+periodic_effects(Core) ->
+    case can_advertise(Core) of
+        true -> [{set_timer, ?INITIAL_PERIODIC_MS, periodic}];
+        false -> []
+    end.
+
+can_advertise(#core{public_key = Pub, private_key = Priv, name = Name}) ->
+    is_binary(Pub) andalso is_binary(Priv) andalso is_binary(Name).
 
 %%------------------------------------------------------------------------------
 %% Receive
@@ -71,3 +117,154 @@ enrich(#{type := advert} = Packet, _Key) ->
     Packet#{sig_ok => meshcore_protocol:verify_advert(Packet)};
 enrich(Packet, _Key) ->
     Packet.
+
+%%------------------------------------------------------------------------------
+%% Periodic advert
+%%------------------------------------------------------------------------------
+
+%% Periodic tick: enqueue a freshly-signed flood ADVERT and re-arm the 60 s
+%% timer. With no identity, do nothing.
+-spec handle_periodic(env(), core_state()) -> {core_state(), [effect()]}.
+handle_periodic(#{wall_s := NowS}, Core) ->
+    case can_advertise(Core) of
+        true ->
+            {enqueue_advert(NowS, Core), [{set_timer, ?PERIODIC_MS, periodic}]};
+        false ->
+            ?MESH_TRACE("[meshcore] periodic skip (no identity)~n", []),
+            {Core, []}
+    end.
+
+enqueue_advert(NowS, #core{public_key = Pub, private_key = Priv, name = Name} = Core) ->
+    AppData = meshcore_protocol:encode_advert_appdata(#{node_type => chat, name => Name}),
+    Advert = meshcore_protocol:sign_advert(
+        #{
+            route => flood,
+            type => advert,
+            version => 0,
+            hash_size => 1,
+            path => <<>>,
+            public_key => Pub,
+            timestamp => NowS,
+            appdata => AppData
+        },
+        Priv
+    ),
+    Payload = meshcore_protocol:serialize(Advert),
+    ?MESH_TRACE("[meshcore] tx advert name=~p ts=~p bytes=~p~n", [Name, NowS, byte_size(Payload)]),
+    enqueue_tx(Payload, now, Core).
+
+%%------------------------------------------------------------------------------
+%% TX queue ADT (a plain FIFO list behind these accessors)
+%%------------------------------------------------------------------------------
+
+enqueue_tx(Payload, NotBefore, Core) ->
+    enqueue_intent(#{payload => Payload, not_before => NotBefore}, Core).
+
+enqueue_intent(Intent, #core{tx_queue = Queue} = Core) ->
+    Core#core{tx_queue = Queue ++ [Intent]}.
+
+%% Pop every due intent (FIFO), removing it from the queue. Used by tests to
+%% drain the queue; the shell pumps with take_one_due/2.
+-spec take_due(core_state(), integer()) -> {[tx_intent()], core_state()}.
+take_due(#core{tx_queue = Queue} = Core, Now) ->
+    {Due, Pending} = lists_partition(fun(Intent) -> is_due(Intent, Now) end, Queue),
+    {Due, Core#core{tx_queue = Pending}}.
+
+is_due(#{not_before := now}, _Now) -> true;
+is_due(#{not_before := NotBefore}, Now) -> NotBefore =< Now.
+
+%% Pop one due intent, leaving the rest (order preserved). The shell pumps one
+%% at a time so RX interleaves between TXs.
+-spec take_one_due(core_state(), integer()) ->
+    {tx_intent(), core_state()} | {none, core_state()}.
+take_one_due(#core{tx_queue = Queue} = Core, Now) ->
+    case take_one_due(Queue, Now, []) of
+        none -> {none, Core};
+        {Intent, Rest} -> {Intent, Core#core{tx_queue = Rest}}
+    end.
+
+take_one_due([], _Now, _Skipped) ->
+    none;
+take_one_due([Intent | Tail], Now, Skipped) ->
+    case is_due(Intent, Now) of
+        true -> {Intent, lists:reverse(Skipped) ++ Tail};
+        false -> take_one_due(Tail, Now, [Intent | Skipped])
+    end.
+
+-spec has_due(core_state(), integer()) -> boolean().
+has_due(#core{tx_queue = Queue}, Now) ->
+    has_due_list(Queue, Now).
+
+has_due_list([], _Now) -> false;
+has_due_list([Intent | Tail], Now) ->
+    case is_due(Intent, Now) of
+        true -> true;
+        false -> has_due_list(Tail, Now)
+    end.
+
+%% Delay (ms) until the earliest not-yet-due intent, or `infinity' if none.
+%% Call after take_due/2 has drained the due intents.
+-spec next_wakeup(core_state(), integer()) -> non_neg_integer() | infinity.
+next_wakeup(#core{tx_queue = Queue}, Now) ->
+    case [NotBefore || #{not_before := NotBefore} <- Queue, is_integer(NotBefore)] of
+        [] -> infinity;
+        Deadlines -> max(0, lists_min(Deadlines) - Now)
+    end.
+
+%% Feed each pumped intent's result back: `ok' is a no-op (take dropped it),
+%% `{error, payload_too_large}' is a permanent drop, any other error is transient
+%% (re-enqueue with back-off, unbounded retry). The batch shares one `rand22',
+%% decorrelated per intent by index+attempts so co-failing intents don't re-collide.
+-spec handle_tx_results([{tx_intent(), ok | {error, term()}}], env(), core_state()) ->
+    core_state().
+handle_tx_results(Results, Env, Core) ->
+    handle_tx_results(Results, Env, Core, 0).
+
+handle_tx_results([], _Env, Core, _Index) ->
+    Core;
+handle_tx_results([{_Intent, ok} | Rest], Env, Core, Index) ->
+    handle_tx_results(Rest, Env, Core, Index + 1);
+handle_tx_results([{_Intent, {error, payload_too_large}} | Rest], Env, Core, Index) ->
+    ?MESH_TRACE("[meshcore] tx drop (payload_too_large) bytes=~p~n", [
+        byte_size(maps:get(payload, _Intent))
+    ]),
+    handle_tx_results(Rest, Env, Core, Index + 1);
+handle_tx_results(
+    [{Intent, {error, _Reason}} | Rest], Env, #core{tx_queue = Queue} = Core, Index
+) ->
+    #{mono_ms := Now, rand22 := Rand} = Env,
+    Attempts = maps:get(attempts, Intent, 0),
+    Seed = Rand bxor (Index bsl 16) bxor (Attempts bsl 8),
+    Backoff = backoff_ms(Attempts, Seed),
+    ?MESH_TRACE("[meshcore] tx retry (~p) attempt=~p in ~pms~n", [_Reason, Attempts + 1, Backoff]),
+    Intent1 = Intent#{not_before => Now + Backoff, attempts => Attempts + 1},
+    handle_tx_results(Rest, Env, Core#core{tx_queue = Queue ++ [Intent1]}, Index + 1).
+
+-spec backoff_ms(non_neg_integer(), non_neg_integer()) -> non_neg_integer().
+backoff_ms(Attempts, Rand) ->
+    Window = ?TX_BACKOFF_BASE_MS bsl min(Attempts, ?TX_BACKOFF_MAX_SHIFT),
+    Rand rem Window.
+
+%%------------------------------------------------------------------------------
+%% AtomVM stdlib gaps
+%%
+%% TODO: drop these and call lists:partition/2 and lists:min/1 directly once
+%% AtomVM exposes them.
+%%------------------------------------------------------------------------------
+
+lists_partition(Pred, List) when is_function(Pred, 1) ->
+    lists_partition(Pred, List, [], []).
+
+lists_partition(Pred, [H | T], As, Bs) ->
+    case Pred(H) of
+        true -> lists_partition(Pred, T, [H | As], Bs);
+        false -> lists_partition(Pred, T, As, [H | Bs])
+    end;
+lists_partition(_Pred, [], As, Bs) ->
+    {lists:reverse(As), lists:reverse(Bs)}.
+
+lists_min([H | T]) -> lists_min(T, H).
+
+lists_min([H | T], Min) when H < Min -> lists_min(T, H);
+lists_min([_ | T], Min) -> lists_min(T, Min);
+lists_min([], Min) -> Min.

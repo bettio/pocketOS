@@ -60,9 +60,25 @@ defmodule RadioLauncher do
         name -> %{name: name, psk: :meshtastic.default_long_fast_psk()}
       end
 
+    meshcore_opts =
+      if :meshcore_protocol.eddsa_available() do
+        {mc_pub, mc_priv} =
+          NodeKey.load_or_generate("FS0:/mckey.bin", fn ->
+            :crypto.generate_key(:eddsa, :ed25519)
+          end)
+
+        [
+          public_key: mc_pub,
+          private_key: mc_priv,
+          name: Map.get(meshtcfg, :long_name, "pocketOS #{short_node_id}")
+        ]
+      else
+        []
+      end
+
     {:ok, _rm} =
       :radio_manager.start_link(complete_config, [
-        {{:local, :meshcore_server}, :meshcore_server, []},
+        {{:local, :meshcore_server}, :meshcore_server, meshcore_opts},
         {{:local, :meshtastic_server}, :meshtastic_server,
          [
            callbacks: MeshtasticCallbacks,

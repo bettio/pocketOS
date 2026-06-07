@@ -1,8 +1,8 @@
 defmodule MeshcoreServerCoreTest do
-  # Pure unit tests for the MeshCore functional core. No process, no mock radio:
-  # each test passes an explicit core state + Env and asserts on the returned
-  # {Reply, CoreState, Effects}. The gen_server wiring is covered by
-  # meshcore_server_test.
+  # Pure unit tests for the MeshCore functional core. No process, no mock radio,
+  # no timers: each test passes an explicit core state + Env and asserts on the
+  # returned {Reply, CoreState, Effects} and the resulting tx_queue (read back
+  # via take_due/2). The gen_server wiring is covered by meshcore_server_test.
   use ExUnit.Case, async: true
 
   # Captured on-air frames: f1 (control discover_req), f8 (group text
@@ -21,16 +21,114 @@ defmodule MeshcoreServerCoreTest do
             0xC0, 0xF2, 0xA8, 0x01, 0x81, 0x74, 0x65, 0x73, 0x74, 0x64>>
   @attrs %{rssi: -66, snr: 6}
 
+  # ---- helpers ----
+
   defp channel_key, do: :meshcore_protocol.default_public_channel_key()
+
+  defp identity_opts do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    [public_key: pub, private_key: priv, name: "pocketOS T1"]
+  end
 
   defp core(opts \\ []) do
     {core, _effects} = :meshcore_server_core.init(opts)
     core
   end
 
-  test "init returns a bare core and arms nothing" do
+  defp drain(core) do
+    {intents, _core2} = :meshcore_server_core.take_due(core, 1_000_000)
+    Enum.map(intents, & &1.payload)
+  end
+
+  defp tx_env(extra \\ %{}), do: Map.merge(%{mono_ms: 5_000, rand22: 0}, extra)
+
+  # ---- init ----
+
+  test "init arms the first periodic timer when a signing identity is present" do
+    {_core, effects} = :meshcore_server_core.init(identity_opts())
+    assert effects == [{:set_timer, 500, :periodic}]
+  end
+
+  test "init without an identity arms nothing" do
     assert {_core, []} = :meshcore_server_core.init([])
   end
+
+  test "init with keys but no name does not advertise" do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    assert {_core, []} = :meshcore_server_core.init(public_key: pub, private_key: priv)
+  end
+
+  # ---- handle_periodic: signed flood advert ----
+
+  test "periodic builds a signed flood advert and re-arms the 60s timer" do
+    opts = identity_opts()
+    ts = 1_700_000_500
+
+    {core2, effects} = :meshcore_server_core.handle_periodic(%{wall_s: ts}, core(opts))
+    assert effects == [{:set_timer, 60_000, :periodic}]
+
+    assert [wire] = drain(core2)
+    {:ok, adv} = :meshcore_protocol.parse(wire)
+    assert adv.route == :flood
+    assert adv.type == :advert
+    assert adv.version == 0
+    assert adv.path == <<>>
+    assert adv.public_key == Keyword.fetch!(opts, :public_key)
+    assert adv.timestamp == ts
+    assert adv.node_type == :chat
+    assert adv.name == "pocketOS T1"
+    assert :meshcore_protocol.verify_advert(adv)
+  end
+
+  test "periodic without an identity emits no advert and no timer" do
+    c = core()
+    assert {^c, []} = :meshcore_server_core.handle_periodic(%{wall_s: 1}, c)
+    assert drain(c) == []
+  end
+
+  # ---- handle_tx_results ----
+
+  defp taken_advert_intent do
+    {core1, _} = :meshcore_server_core.handle_periodic(%{wall_s: 1}, core(identity_opts()))
+    {intent, core2} = :meshcore_server_core.take_one_due(core1, 1_000_000)
+    {intent, core2}
+  end
+
+  test "a successful tx leaves the queue empty" do
+    {intent, core2} = taken_advert_intent()
+    core3 = :meshcore_server_core.handle_tx_results([{intent, :ok}], tx_env(), core2)
+    assert drain(core3) == []
+  end
+
+  test "payload_too_large is dropped permanently" do
+    {intent, core2} = taken_advert_intent()
+
+    core3 =
+      :meshcore_server_core.handle_tx_results(
+        [{intent, {:error, :payload_too_large}}],
+        tx_env(),
+        core2
+      )
+
+    assert drain(core3) == []
+  end
+
+  test "a transient tx error re-enqueues with a back-off deadline" do
+    {intent, core2} = taken_advert_intent()
+    assert drain(core2) == []
+
+    core3 =
+      :meshcore_server_core.handle_tx_results([{intent, {:error, :timeout}}], tx_env(), core2)
+
+    {due_before, _} = :meshcore_server_core.take_due(core3, 4_999)
+    assert due_before == []
+
+    {[reenqueued], _} = :meshcore_server_core.take_due(core3, 5_000)
+    assert reenqueued.payload == intent.payload
+    assert reenqueued.attempts == 1
+  end
+
+  # ---- handle_rx: enrich + attributes ----
 
   test "rx delivers decrypted group text with rssi/snr merged in" do
     {:ok, pkt} = :meshcore_protocol.parse(@grp_txt)

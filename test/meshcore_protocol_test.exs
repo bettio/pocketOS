@@ -127,6 +127,61 @@ defmodule MeshcoreProtocolTest do
     refute :meshcore_protocol.verify_advert(tampered)
   end
 
+  test "sign_advert produces a signature verify_advert accepts; tampering breaks it" do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    appdata = :meshcore_protocol.encode_advert_appdata(%{node_type: :chat, name: "pocketOS T1"})
+
+    base = %{
+      route: :flood,
+      type: :advert,
+      version: 0,
+      hash_size: 1,
+      path: <<>>,
+      public_key: pub,
+      timestamp: 1_700_000_000,
+      appdata: appdata
+    }
+
+    signed = :meshcore_protocol.sign_advert(base, priv)
+    assert byte_size(signed.signature) == 64
+    assert :meshcore_protocol.verify_advert(signed)
+
+    <<first, rest::binary>> = signed.signature
+    tampered = %{signed | signature: <<rem(first + 1, 256), rest::binary>>}
+    refute :meshcore_protocol.verify_advert(tampered)
+  end
+
+  test "a self-built signed advert round-trips through serialize/parse" do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    appdata = :meshcore_protocol.encode_advert_appdata(%{node_type: :chat, name: "pocketOS T1"})
+
+    signed =
+      :meshcore_protocol.sign_advert(
+        %{
+          route: :flood,
+          type: :advert,
+          version: 0,
+          hash_size: 1,
+          path: <<>>,
+          public_key: pub,
+          timestamp: 1_700_000_123,
+          appdata: appdata
+        },
+        priv
+      )
+
+    wire = :meshcore_protocol.serialize(signed)
+    {:ok, adv} = :meshcore_protocol.parse(wire)
+    assert adv.route == :flood
+    assert adv.type == :advert
+    assert adv.flags == 0x81
+    assert adv.node_type == :chat
+    assert adv.name == "pocketOS T1"
+    assert adv.public_key == pub
+    assert adv.timestamp == 1_700_000_123
+    assert :meshcore_protocol.verify_advert(adv)
+  end
+
   test "GRP_TXT decrypts to the captured plaintext on the Public channel" do
     assert :meshcore_protocol.channel_hash(:meshcore_protocol.default_public_channel_key()) ==
              0x11
