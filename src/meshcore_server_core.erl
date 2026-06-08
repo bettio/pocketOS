@@ -200,16 +200,22 @@ maybe_reply_discover(
     NowMs = maps:get(mono_ms, Env),
     case rl_allow(NowMs, Core#core.discover_rl) of
         {false, Rl} ->
+            ?MESH_TRACE("[meshcore] discover reply rate-limited tag=~p~n", [Tag]),
             Core#core{discover_rl = Rl};
         {true, Rl} ->
             case responds_to(Filter, ?NODE_TYPE) of
                 false ->
+                    ?MESH_TRACE("[meshcore] discover skip tag=~p filter=~p~n", [Tag, Filter]),
                     Core#core{discover_rl = Rl};
                 true ->
                     Payload = discover_resp_payload(Tag, PrefixOnly, Attributes, Pub),
                     Rand = maps:get(rand22, Env),
-                    NotBefore = NowMs + discover_reply_delay(byte_size(Payload), Rand, Core),
-                    enqueue_tx(Payload, NotBefore, Core#core{discover_rl = Rl})
+                    Delay = discover_reply_delay(byte_size(Payload), Rand, Core),
+                    ?MESH_TRACE(
+                        "[meshcore] discover reply tag=~p snr=~p delay=~pms~n",
+                        [Tag, maps:get(snr, Attributes, undefined), Delay]
+                    ),
+                    enqueue_tx(Payload, NowMs + Delay, Core#core{discover_rl = Rl})
             end
     end;
 maybe_reply_discover(_Packet, _Attributes, _Env, Core) ->
