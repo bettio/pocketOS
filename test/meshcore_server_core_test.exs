@@ -170,4 +170,67 @@ defmodule MeshcoreServerCoreTest do
     {:ok, pkt} = :meshcore_protocol.parse(@control)
     assert :meshcore_server_core.enrich(pkt, channel_key()) == pkt
   end
+
+  # ---- handle_rx: discover reply ----
+
+  test "rx answers a matching network scan with a zero-hop DISCOVER_RESP" do
+    opts = identity_opts()
+    {:ok, req} = :meshcore_protocol.parse(@control)
+    {:ok, core1, effects} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(), core(opts))
+
+    # the request itself is still delivered for logging
+    assert [{:deliver, _}] = effects
+
+    # and a DISCOVER_RESP is enqueued, echoing the tag with our identity and SNR
+    assert [wire] = drain(core1)
+    {:ok, resp} = :meshcore_protocol.parse(wire)
+    assert resp.route == :direct
+    assert resp.path == <<>>
+    assert resp.type == :control
+    assert resp.sub_type == :discover_resp
+    assert resp.node_type == :chat
+    assert resp.tag == <<0xBC, 0xC7, 0x32, 0x10>>
+    assert resp.reported_snr == 24
+    assert resp.public_key == Keyword.fetch!(opts, :public_key)
+  end
+
+  test "rx replies only when the type filter selects our (chat) node type" do
+    opts = identity_opts()
+
+    # 0x04 = 1 <<< ADV_TYPE_REPEATER -- chat bit (0x02) not set
+    repeater_scan = <<0x2E, 0x00, 0x80, 0x04, 0xBC, 0xC7, 0x32, 0x10>>
+    {:ok, req1} = :meshcore_protocol.parse(repeater_scan)
+    {:ok, core1, _} = :meshcore_server_core.handle_rx(req1, @attrs, tx_env(), core(opts))
+    assert drain(core1) == []
+
+    # 0x02 = 1 <<< ADV_TYPE_CHAT -- selects us
+    chat_scan = <<0x2E, 0x00, 0x80, 0x02, 0xBC, 0xC7, 0x32, 0x10>>
+    {:ok, req2} = :meshcore_protocol.parse(chat_scan)
+    {:ok, core2, _} = :meshcore_server_core.handle_rx(req2, @attrs, tx_env(), core(opts))
+    assert [_wire] = drain(core2)
+  end
+
+  test "rx rate-limits discover replies to a fixed window" do
+    opts = identity_opts()
+    {:ok, req} = :meshcore_protocol.parse(@control)
+
+    # five scans inside one window -> four replies, the fifth denied
+    c5 =
+      Enum.reduce(1..5, core(opts), fn _i, c ->
+        {:ok, c2, _} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(), c)
+        c2
+      end)
+
+    assert length(drain(c5)) == 4
+
+    # a scan after the window lapses opens a fresh window and replies again
+    {:ok, c6, _} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(%{mono_ms: 130_000}), c5)
+    assert length(drain(c6)) == 5
+  end
+
+  test "rx does not answer a scan without a signing identity" do
+    {:ok, req} = :meshcore_protocol.parse(@control)
+    {:ok, core1, _} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(), core())
+    assert drain(core1) == []
+  end
 end

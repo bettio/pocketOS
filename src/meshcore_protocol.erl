@@ -13,7 +13,8 @@
     eddsa_available/0,
     channel_hash/1,
     default_public_channel/0,
-    default_public_channel_key/0
+    default_public_channel_key/0,
+    node_type_to_int/1
 ]).
 
 -type packet() :: map().

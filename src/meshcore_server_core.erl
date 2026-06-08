@@ -36,7 +36,9 @@
     private_key :: binary() | undefined,
     name :: binary() | undefined,
     channel_key :: binary(),
-    tx_queue = [] :: [tx_intent()]
+    tx_queue = [] :: [tx_intent()],
+    %% discover-reply rate limiter: {window_start_ms, count}
+    discover_rl = {0, 0} :: {integer(), non_neg_integer()}
 }).
 
 -opaque core_state() :: #core{}.
@@ -62,6 +64,11 @@
 
 -define(TX_BACKOFF_BASE_MS, 250).
 -define(TX_BACKOFF_MAX_SHIFT, 4).
+
+-define(NODE_TYPE, chat).
+-define(SNR_UNKNOWN, -128).
+-define(DISCOVER_RL_MAX, 4).
+-define(DISCOVER_RL_WINDOW_MS, 120000).
 
 %%------------------------------------------------------------------------------
 %% Construction
@@ -95,9 +102,10 @@ can_advertise(#core{public_key = Pub, private_key = Priv, name = Name}) ->
 %% Enrich a parsed inbound frame and deliver it with the radio rssi/snr merged
 %% in. No forwarding or storage yet.
 -spec handle_rx(map(), map(), env(), core_state()) -> {ok, core_state(), [effect()]}.
-handle_rx(Packet, Attributes, _Env, #core{channel_key = ChannelKey} = Core) ->
+handle_rx(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) ->
     Delivered = with_attributes(enrich(Packet, ChannelKey), Attributes),
-    {ok, Core, [{deliver, Delivered}]}.
+    Core1 = maybe_reply_discover(Packet, Attributes, Env, Core0),
+    {ok, Core1, [{deliver, Delivered}]}.
 
 with_attributes(Packet, Attributes) ->
     Packet#{
@@ -135,7 +143,7 @@ handle_periodic(#{wall_s := NowS}, Core) ->
     end.
 
 enqueue_advert(NowS, #core{public_key = Pub, private_key = Priv, name = Name} = Core) ->
-    AppData = meshcore_protocol:encode_advert_appdata(#{node_type => chat, name => Name}),
+    AppData = meshcore_protocol:encode_advert_appdata(#{node_type => ?NODE_TYPE, name => Name}),
     Advert = meshcore_protocol:sign_advert(
         #{
             route => flood,
@@ -152,6 +160,84 @@ enqueue_advert(NowS, #core{public_key = Pub, private_key = Priv, name = Name} = 
     Payload = meshcore_protocol:serialize(Advert),
     ?MESH_TRACE("[meshcore] tx advert name=~p ts=~p bytes=~p~n", [Name, NowS, byte_size(Payload)]),
     enqueue_tx(Payload, now, Core).
+
+%%------------------------------------------------------------------------------
+%% Discover reply
+%%------------------------------------------------------------------------------
+
+%% Answer a matching network-scan DISCOVER_REQ with a rate-limited, zero-hop
+%% DIRECT DISCOVER_RESP.
+maybe_reply_discover(
+    #{
+        type := control,
+        sub_type := discover_req,
+        type_filter := Filter,
+        tag := Tag,
+        prefix_only := PrefixOnly
+    },
+    Attributes,
+    Env,
+    #core{public_key = Pub} = Core
+) when is_binary(Pub) ->
+    NowMs = maps:get(mono_ms, Env),
+    case rl_allow(NowMs, Core#core.discover_rl) of
+        {false, Rl} ->
+            Core#core{discover_rl = Rl};
+        {true, Rl} ->
+            case responds_to(Filter, ?NODE_TYPE) of
+                false ->
+                    Core#core{discover_rl = Rl};
+                true ->
+                    Payload = discover_resp_payload(Tag, PrefixOnly, Attributes, Pub),
+                    enqueue_tx(Payload, now, Core#core{discover_rl = Rl})
+            end
+    end;
+maybe_reply_discover(_Packet, _Attributes, _Env, Core) ->
+    Core.
+
+%% Build + serialize a DISCOVER_RESP: our node type, the SNR we heard the request
+%% at (x4), the echoed tag, and our key (8-byte prefix when the request asks).
+discover_resp_payload(Tag, PrefixOnly, Attributes, Pub) ->
+    Key =
+        case PrefixOnly of
+            true ->
+                <<Prefix:8/binary, _/binary>> = Pub,
+                Prefix;
+            false ->
+                Pub
+        end,
+    Resp = #{
+        route => direct,
+        type => control,
+        version => 0,
+        hash_size => 1,
+        path => <<>>,
+        sub_type => discover_resp,
+        node_type => ?NODE_TYPE,
+        reported_snr => snr_byte(maps:get(snr, Attributes, undefined)),
+        tag => Tag,
+        public_key => Key
+    },
+    meshcore_protocol:serialize(Resp).
+
+%% Respond only when the request's type filter selects our node type.
+responds_to(Filter, NodeType) ->
+    Filter band (1 bsl meshcore_protocol:node_type_to_int(NodeType)) =/= 0.
+
+%% Fixed-window rate limiter: count within the current window and deny past the
+%% max; once it lapses, open a fresh window.
+rl_allow(NowMs, {Start, Count}) when NowMs < Start + ?DISCOVER_RL_WINDOW_MS ->
+    {Count + 1 =< ?DISCOVER_RL_MAX, {Start, Count + 1}};
+rl_allow(NowMs, _Window) ->
+    {true, {NowMs, 1}}.
+
+%% Encode an SNR (dB) as the signed x4 wire byte.
+snr_byte(undefined) -> ?SNR_UNKNOWN;
+snr_byte(Snr) -> clamp(trunc(Snr * 4), -127, 127).
+
+clamp(V, Lo, _Hi) when V < Lo -> Lo;
+clamp(V, _Lo, Hi) when V > Hi -> Hi;
+clamp(V, _Lo, _Hi) -> V.
 
 %%------------------------------------------------------------------------------
 %% TX queue ADT (a plain FIFO list behind these accessors)
