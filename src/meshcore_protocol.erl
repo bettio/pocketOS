@@ -155,6 +155,14 @@ parse_control(16#8, Lo, <<TypeFilter, Tag:4/binary, Since:32/little-unsigned>>, 
         tag => Tag,
         since => Since
     };
+parse_control(16#9, NodeType, <<Snr:8/signed, Tag:4/binary, Key/binary>>, _Payload, Base) ->
+    Base#{
+        sub_type => discover_resp,
+        node_type => node_type(NodeType),
+        reported_snr => Snr,
+        tag => Tag,
+        public_key => Key
+    };
 parse_control(SubType, _Flags, _Data, Payload, Base) ->
     Base#{sub_type => {raw, SubType}, payload => Payload}.
 
@@ -197,6 +205,9 @@ serialize_payload(control, #{sub_type := discover_req} = Packet) ->
             S -> <<S:32/little-unsigned>>
         end,
     <<16#8:4, 0:3, (bool_to_int(PrefixOnly)):1, TypeFilter, Tag/binary, Since/binary>>;
+serialize_payload(control, #{sub_type := discover_resp} = Packet) ->
+    #{node_type := NodeType, reported_snr := Snr, tag := Tag, public_key := Key} = Packet,
+    <<16#9:4, (node_type_to_int(NodeType)):4, Snr:8/signed, Tag/binary, Key/binary>>;
 serialize_payload(Type, #{channel_hash := ChannelHash, cipher_mac := Mac, ciphertext := CT}) when
     Type =:= grp_txt; Type =:= grp_data
 ->

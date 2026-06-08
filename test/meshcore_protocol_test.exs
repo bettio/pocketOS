@@ -234,4 +234,60 @@ defmodule MeshcoreProtocolTest do
     {:ok, redec} = :meshcore_protocol.decrypt(reparsed)
     assert redec.text == "pocketOS: hi"
   end
+
+  test "DISCOVER_RESP serializes to the wire layout and round-trips (full key)" do
+    tag = <<0xBC, 0xC7, 0x32, 0x10>>
+
+    resp = %{
+      route: :direct,
+      type: :control,
+      version: 0,
+      hash_size: 1,
+      path: <<>>,
+      sub_type: :discover_resp,
+      node_type: :chat,
+      reported_snr: 24,
+      tag: tag,
+      public_key: @public_key
+    }
+
+    # header 0x2E (v0/control/direct), path_len 0x00, flags 0x91 (0x9<<4 | chat),
+    # snr byte 24, echoed tag, full 32-byte key.
+    wire = :meshcore_protocol.serialize(resp)
+    assert wire == <<0x2E, 0x00, 0x91, 0x18>> <> tag <> @public_key
+
+    {:ok, back} = :meshcore_protocol.parse(wire)
+    assert back.route == :direct
+    assert back.type == :control
+    assert back.sub_type == :discover_resp
+    assert back.node_type == :chat
+    assert back.reported_snr == 24
+    assert back.tag == tag
+    assert back.public_key == @public_key
+  end
+
+  test "DISCOVER_RESP carries an 8-byte key prefix and a negative SNR" do
+    tag = <<0x01, 0x02, 0x03, 0x04>>
+    prefix = binary_part(@public_key, 0, 8)
+
+    resp = %{
+      route: :direct,
+      type: :control,
+      version: 0,
+      hash_size: 1,
+      path: <<>>,
+      sub_type: :discover_resp,
+      node_type: :chat,
+      reported_snr: -8,
+      tag: tag,
+      public_key: prefix
+    }
+
+    wire = :meshcore_protocol.serialize(resp)
+    assert wire == <<0x2E, 0x00, 0x91, 0xF8>> <> tag <> prefix
+
+    {:ok, back} = :meshcore_protocol.parse(wire)
+    assert back.reported_snr == -8
+    assert back.public_key == prefix
+  end
 end
