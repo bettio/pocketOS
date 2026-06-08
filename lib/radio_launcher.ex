@@ -70,7 +70,11 @@ defmodule RadioLauncher do
         [
           public_key: mc_pub,
           private_key: mc_priv,
-          name: Map.get(meshtcfg, :long_name, "pocketOS #{short_node_id}")
+          name: Map.get(meshtcfg, :long_name, "pocketOS #{short_node_id}"),
+          spreading_factor: Map.fetch!(complete_config, :spreading_factor),
+          bandwidth_hz: Map.fetch!(complete_config, :bandwidth_hz),
+          coding_rate: Map.fetch!(complete_config, :coding_rate),
+          preamble_length: Map.fetch!(complete_config, :preamble_length)
         ]
       else
         []

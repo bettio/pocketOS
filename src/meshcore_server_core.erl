@@ -38,7 +38,12 @@
     channel_key :: binary(),
     tx_queue = [] :: [tx_intent()],
     %% discover-reply rate limiter: {window_start_ms, count}
-    discover_rl = {0, 0} :: {integer(), non_neg_integer()}
+    discover_rl = {0, 0} :: {integer(), non_neg_integer()},
+    %% modulation params, for the airtime-derived discover-reply jitter
+    spreading_factor = 11 :: pos_integer(),
+    bandwidth_hz = 250000 :: pos_integer(),
+    coding_rate = 5 :: 5..8,
+    preamble_length = 16 :: pos_integer()
 }).
 
 -opaque core_state() :: #core{}.
@@ -70,6 +75,9 @@
 -define(DISCOVER_RL_MAX, 4).
 -define(DISCOVER_RL_WINDOW_MS, 120000).
 
+-define(DISCOVER_SLOTS, 5).
+-define(DISCOVER_DELAY_WIDEN, 4).
+
 %%------------------------------------------------------------------------------
 %% Construction
 %%------------------------------------------------------------------------------
@@ -82,9 +90,19 @@ init(Opts) ->
         name = proplists:get_value(name, Opts),
         channel_key = proplists:get_value(
             channel_key, Opts, meshcore_protocol:default_public_channel_key()
-        )
+        ),
+        spreading_factor = proplists:get_value(spreading_factor, Opts, 11),
+        bandwidth_hz = proplists:get_value(bandwidth_hz, Opts, 250000),
+        coding_rate = coding_rate_denominator(proplists:get_value(coding_rate, Opts)),
+        preamble_length = proplists:get_value(preamble_length, Opts, 16)
     },
     {Core, periodic_effects(Core)}.
+
+coding_rate_denominator(cr_4_5) -> 5;
+coding_rate_denominator(cr_4_6) -> 6;
+coding_rate_denominator(cr_4_7) -> 7;
+coding_rate_denominator(cr_4_8) -> 8;
+coding_rate_denominator(_) -> 5.
 
 periodic_effects(Core) ->
     case can_advertise(Core) of
@@ -189,7 +207,9 @@ maybe_reply_discover(
                     Core#core{discover_rl = Rl};
                 true ->
                     Payload = discover_resp_payload(Tag, PrefixOnly, Attributes, Pub),
-                    enqueue_tx(Payload, now, Core#core{discover_rl = Rl})
+                    Rand = maps:get(rand22, Env),
+                    NotBefore = NowMs + discover_reply_delay(byte_size(Payload), Rand, Core),
+                    enqueue_tx(Payload, NotBefore, Core#core{discover_rl = Rl})
             end
     end;
 maybe_reply_discover(_Packet, _Attributes, _Env, Core) ->
@@ -238,6 +258,32 @@ snr_byte(Snr) -> clamp(trunc(Snr * 4), -127, 127).
 clamp(V, Lo, _Hi) when V < Lo -> Lo;
 clamp(V, _Lo, Hi) when V > Hi -> Hi;
 clamp(V, _Lo, _Hi) -> V.
+
+%% Airtime-proportional reply jitter, spreading co-located responders so CAD
+%% can de-conflict them.
+discover_reply_delay(WireBytes, Rand, Core) ->
+    Airtime = packet_airtime_ms(WireBytes, Core),
+    T = (Airtime * 52 div 50) div 2,
+    (Rand rem ?DISCOVER_SLOTS) * T * ?DISCOVER_DELAY_WIDEN.
+
+%% LoRa time-on-air (ms) of a WireBytes frame under the configured modulation.
+packet_airtime_ms(TotalBytes, #core{
+    spreading_factor = Sf,
+    bandwidth_hz = BwHz,
+    coding_rate = Cr,
+    preamble_length = PreambleLen
+}) ->
+    TSymMs = (1 bsl Sf) * 1000 / BwHz,
+    LowDataOpt =
+        case TSymMs > 16.0 of
+            true -> 1;
+            false -> 0
+        end,
+    TPreambleMs = (PreambleLen + 4.25) * TSymMs,
+    Num = 8 * TotalBytes - 4 * Sf + 28 + 16,
+    Den = 4 * (Sf - 2 * LowDataOpt),
+    NPayload = 8 + max(ceil(Num / Den) * Cr, 0),
+    trunc(TPreambleMs + NPayload * TSymMs).
 
 %%------------------------------------------------------------------------------
 %% TX queue ADT (a plain FIFO list behind these accessors)

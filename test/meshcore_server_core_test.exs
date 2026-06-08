@@ -233,4 +233,33 @@ defmodule MeshcoreServerCoreTest do
     {:ok, core1, _} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(), core())
     assert drain(core1) == []
   end
+
+  # ---- handle_rx: airtime-proportional reply delay ----
+
+  defp reply_not_before(extra_opts, env_extra) do
+    opts = identity_opts() ++ extra_opts
+    env = tx_env(env_extra)
+    {:ok, req} = :meshcore_protocol.parse(@control)
+    {:ok, core1, _} = :meshcore_server_core.handle_rx(req, @attrs, env, core(opts))
+    {[intent], _} = :meshcore_server_core.take_due(core1, 100_000_000)
+    intent.not_before - env.mono_ms
+  end
+
+  test "reply delay is zero on slot 0 and scales by airtime slot" do
+    # slot = rand22 rem 5; slots 0 and 5 -> no delay
+    assert reply_not_before([], %{rand22: 0}) == 0
+    assert reply_not_before([], %{rand22: 5}) == 0
+
+    # slots 1 and 2 -> non-zero, in a 1:2 ratio (discrete airtime slots)
+    d1 = reply_not_before([], %{rand22: 1})
+    d2 = reply_not_before([], %{rand22: 2})
+    assert d1 > 0
+    assert d2 == 2 * d1
+  end
+
+  test "reply delay grows with the spreading factor (airtime)" do
+    d_sf9 = reply_not_before([spreading_factor: 9], %{rand22: 1})
+    d_sf12 = reply_not_before([spreading_factor: 12], %{rand22: 1})
+    assert d_sf12 > d_sf9
+  end
 end
