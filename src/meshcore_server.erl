@@ -125,8 +125,10 @@ arm_tx_pump(Core, Now) ->
 
 %% Drop the bulky binaries that are just noise in the serial log; the full map
 %% from the core keeps them for storage.
+%% TODO: collapse to maps:without/2 once AtomVM exposes it (absent as of 0.7).
 for_log(Packet) ->
-    maps:remove(appdata, maps:remove(signature, maps:remove(public_key, Packet))).
+    P1 = maps:remove(appdata, maps:remove(signature, maps:remove(public_key, Packet))),
+    maps:remove(ciphertext, maps:remove(sender_pubkey, P1)).
 
 rand22() ->
     <<TopRand:22, _:10>> = crypto:strong_rand_bytes(4),

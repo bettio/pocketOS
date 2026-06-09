@@ -5,6 +5,8 @@
     serialize/1,
     decrypt/1,
     decrypt/2,
+    decrypt_shared/2,
+    shared_secret/2,
     encrypt/1,
     encrypt/2,
     verify_advert/1,
@@ -98,6 +100,18 @@ parse_payload(Type, Payload, Base) when
             Base#{
                 dest_hash => DestHash,
                 src_hash => SrcHash,
+                cipher_mac => CipherMac,
+                ciphertext => Ciphertext
+            };
+        _ ->
+            Base#{payload => Payload}
+    end;
+parse_payload(anon_req, Payload, Base) ->
+    case Payload of
+        <<DestHash, SenderPubKey:32/binary, CipherMac:2/binary, Ciphertext/binary>> ->
+            Base#{
+                dest_hash => DestHash,
+                sender_pubkey => SenderPubKey,
                 cipher_mac => CipherMac,
                 ciphertext => Ciphertext
             };
@@ -217,6 +231,10 @@ serialize_payload(Type, #{dest_hash := Dest, src_hash := Src, cipher_mac := Mac,
     Type =:= txt_msg; Type =:= req; Type =:= response; Type =:= path
 ->
     <<Dest, Src, Mac/binary, CT/binary>>;
+serialize_payload(anon_req, #{
+    dest_hash := Dest, sender_pubkey := Sender, cipher_mac := Mac, ciphertext := CT
+}) ->
+    <<Dest, Sender/binary, Mac/binary, CT/binary>>;
 serialize_payload(_Type, #{payload := Payload}) ->
     Payload.
 
@@ -263,6 +281,43 @@ last_nonzero(<<0, Rest/binary>>, Index, LastLen) ->
     last_nonzero(Rest, Index + 1, LastLen);
 last_nonzero(<<_Byte, Rest/binary>>, Index, _LastLen) ->
     last_nonzero(Rest, Index + 1, Index + 1).
+
+%% === shared-secret (PKI) ===
+
+%% X25519 ECDH shared secret from our Ed25519 seed and a peer's Ed25519
+%% public key. A bad/low-order peer key comes back as {error, Reason}.
+-spec shared_secret(binary(), binary()) -> {ok, binary()} | {error, term()}.
+shared_secret(OurSeed, PeerEdPub) ->
+    try
+        {ok, ed25519_x25519:shared_secret(OurSeed, PeerEdPub)}
+    catch
+        error:Reason -> {error, Reason}
+    end.
+
+%% Decrypt a PKI message with a 32-byte shared secret (HMAC on the full
+%% secret, AES key = its first 16 bytes); yields timestamp + req_data.
+-spec decrypt_shared(binary(), packet()) -> {ok, packet()} | {error, atom()}.
+decrypt_shared(Secret, #{cipher_mac := Mac, ciphertext := CT} = Packet) when
+    byte_size(Secret) =:= 32
+->
+    <<CalcMac:2/binary, _/binary>> = crypto:mac(hmac, sha256, Secret, CT),
+    case CalcMac =:= Mac of
+        false ->
+            {error, bad_mac};
+        true ->
+            <<AesKey:16/binary, _/binary>> = Secret,
+            case aes_ecb(AesKey, CT, false) of
+                <<Timestamp:32/little-unsigned, ReqData/binary>> ->
+                    Decrypted = Packet#{
+                        timestamp => Timestamp, req_data => strip_trailing_nuls(ReqData)
+                    },
+                    {ok, maps:remove(cipher_mac, maps:remove(ciphertext, Decrypted))};
+                _ ->
+                    {error, short_plaintext}
+            end
+    end;
+decrypt_shared(_Secret, _Packet) ->
+    {error, no_ciphertext}.
 
 %% === encrypt ===
 

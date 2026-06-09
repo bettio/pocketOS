@@ -262,4 +262,66 @@ defmodule MeshcoreServerCoreTest do
     d_sf12 = reply_not_before([spreading_factor: 12], %{rand22: 1})
     assert d_sf12 > d_sf9
   end
+
+  # ---- handle_rx: anon_req ----
+
+  test "rx decrypts an anon_req addressed to us and never replies" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    frame = anon_req_frame(our_pub, sender_pub, sender_priv, 1_700_000_000, "hello test direct")
+    {:ok, pkt} = :meshcore_protocol.parse(frame)
+
+    {:ok, core1, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
+
+    assert [{:deliver, delivered}] = effects
+    assert delivered.type == :anon_req
+    assert delivered.timestamp == 1_700_000_000
+    assert delivered.req_data == "hello test direct"
+    assert delivered.sender_pubkey == sender_pub
+    assert delivered.rssi == -66
+    refute Map.has_key?(delivered, :ciphertext)
+    refute Map.has_key?(delivered, :cipher_mac)
+    assert drain(core1) == []
+  end
+
+  test "rx passes through an anon_req not addressed to us" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    <<0x1E, 0x00, dest, rest::binary>> = anon_req_frame(our_pub, sender_pub, sender_priv, 1, "x")
+    {:ok, pkt} = :meshcore_protocol.parse(<<0x1E, 0x00, rem(dest + 1, 256), rest::binary>>)
+
+    {:ok, core1, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
+    assert [{:deliver, delivered}] = effects
+    refute Map.has_key?(delivered, :req_data)
+    refute Map.has_key?(delivered, :decrypt_error)
+    assert drain(core1) == []
+  end
+
+  test "rx flags an undecryptable anon_req addressed to us" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+    {_, wrong_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    frame = anon_req_frame(our_pub, sender_pub, wrong_priv, 1, "x")
+    {:ok, pkt} = :meshcore_protocol.parse(frame)
+
+    {:ok, core1, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
+    assert [{:deliver, delivered}] = effects
+    assert delivered.decrypt_error == :bad_mac
+    refute Map.has_key?(delivered, :req_data)
+    assert drain(core1) == []
+  end
+
+  defp anon_req_frame(recipient_pub, sender_pub, sender_priv, timestamp, req_data) do
+    {:ok, secret} = :meshcore_protocol.shared_secret(sender_priv, recipient_pub)
+    inner = <<timestamp::32-little>> <> req_data
+    pad = rem(16 - rem(byte_size(inner), 16), 16)
+    <<aes_key::16-bytes, _::binary>> = secret
+    ct = :crypto.crypto_one_time(:aes_128_ecb, aes_key, inner <> :binary.copy(<<0>>, pad), true)
+    <<mac::2-bytes, _::binary>> = :crypto.mac(:hmac, :sha256, secret, ct)
+    <<dest_hash, _::binary>> = recipient_pub
+    <<0x1E, 0x00, dest_hash, sender_pub::binary, mac::binary, ct::binary>>
+  end
 end

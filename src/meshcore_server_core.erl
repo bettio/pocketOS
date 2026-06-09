@@ -121,9 +121,14 @@ can_advertise(#core{public_key = Pub, private_key = Priv, name = Name}) ->
 %% in. No forwarding or storage yet.
 -spec handle_rx(map(), map(), env(), core_state()) -> {ok, core_state(), [effect()]}.
 handle_rx(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) ->
-    Delivered = with_attributes(enrich(Packet, ChannelKey), Attributes),
+    Delivered = with_attributes(enrich_rx(Packet, ChannelKey, Core0), Attributes),
     Core1 = maybe_reply_discover(Packet, Attributes, Env, Core0),
     {ok, Core1, [{deliver, Delivered}]}.
+
+enrich_rx(#{type := anon_req} = Packet, _ChannelKey, Core) ->
+    enrich_anon(Packet, Core);
+enrich_rx(Packet, ChannelKey, _Core) ->
+    enrich(Packet, ChannelKey).
 
 with_attributes(Packet, Attributes) ->
     Packet#{
@@ -142,6 +147,22 @@ enrich(#{type := grp_txt} = Packet, Key) ->
 enrich(#{type := advert} = Packet, _Key) ->
     Packet#{sig_ok => meshcore_protocol:verify_advert(Packet)};
 enrich(Packet, _Key) ->
+    Packet.
+
+enrich_anon(
+    #{dest_hash := DestHash, sender_pubkey := SenderPub} = Packet,
+    #core{public_key = <<OurFirst, _/binary>>, private_key = Priv}
+) when is_binary(Priv), DestHash =:= OurFirst ->
+    case meshcore_protocol:shared_secret(Priv, SenderPub) of
+        {ok, Secret} ->
+            case meshcore_protocol:decrypt_shared(Secret, Packet) of
+                {ok, Decrypted} -> Decrypted;
+                {error, Reason} -> Packet#{decrypt_error => Reason}
+            end;
+        {error, Reason} ->
+            Packet#{decrypt_error => Reason}
+    end;
+enrich_anon(Packet, _Core) ->
     Packet.
 
 %%------------------------------------------------------------------------------

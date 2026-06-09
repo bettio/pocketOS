@@ -65,7 +65,12 @@ defmodule MeshcoreProtocolTest do
          0xF2, 0x6C, 0x3B, 0x71, 0xD6, 0xE9, 0x7E, 0x79, 0xD2, 0x30, 0x5A, 0x16, 0x1A, 0x53, 0x83,
          0x5C, 0x06, 0x2C, 0x8A, 0xBA, 0x7A, 0x3A, 0xB8>>
 
-  @frames [@f1, @f2, @f3, @f4, @f5, @f6, @f7, @f8, @f9, @f10, @f11, @f12, @f13]
+  @f15 <<0x1E, 0x00, 0xF2, 0x5E, 0xD2, 0x93, 0xBE, 0x81, 0x22, 0xCB, 0xA3, 0x0D, 0xF6, 0xF6, 0x8C,
+         0xCA, 0xDD, 0x32, 0x2A, 0x15, 0x7B, 0xB3, 0xDC, 0x88, 0x40, 0x58, 0xF4, 0xA8, 0xD5, 0x73,
+         0x5F, 0x9D, 0xBB, 0xE1, 0xF4, 0x53, 0xCF, 0x8D, 0x45, 0x04, 0xBB, 0xAD, 0x39, 0x89, 0x93,
+         0x0C, 0x99, 0x83, 0x67, 0xF7, 0x40, 0x4D, 0x26>>
+
+  @frames [@f1, @f2, @f3, @f4, @f5, @f6, @f7, @f8, @f9, @f10, @f11, @f12, @f13, @f15]
 
   # The other node's Ed25519 identity, appearing verbatim at offset 2 of every ADVERT.
   @public_key <<0x5E, 0xD2, 0x93, 0xBE, 0x81, 0x22, 0xCB, 0xA3, 0x0D, 0xF6, 0xF6, 0x8C, 0xCA,
@@ -289,5 +294,60 @@ defmodule MeshcoreProtocolTest do
     {:ok, back} = :meshcore_protocol.parse(wire)
     assert back.reported_snr == -8
     assert back.public_key == prefix
+  end
+
+  test "ANON_REQ splits dest_hash, sender pubkey, cipher_mac and ciphertext" do
+    {:ok, pkt} = :meshcore_protocol.parse(@f15)
+    assert pkt.type == :anon_req
+    assert pkt.route == :direct
+    assert pkt.version == 0
+    assert pkt.path == <<>>
+    assert pkt.dest_hash == 0xF2
+    assert pkt.sender_pubkey == @public_key
+    assert pkt.cipher_mac == <<0x53, 0xCF>>
+    assert byte_size(pkt.ciphertext) == 16
+  end
+
+  test "shared_secret yields a 32-byte secret, or an error for a low-order key" do
+    {bob_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+    {_, alice_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    assert {:ok, secret} = :meshcore_protocol.shared_secret(alice_priv, bob_pub)
+    assert byte_size(secret) == 32
+    assert {:error, _} = :meshcore_protocol.shared_secret(alice_priv, <<0::256>>)
+  end
+
+  test "decrypt_shared recovers a PKI message built with the documented scheme" do
+    {:ok, secret} = pki_secret()
+    {mac, ct} = encrypt_shared(secret, 1_700_000_000, "hello test direct")
+    {:ok, dec} = :meshcore_protocol.decrypt_shared(secret, %{cipher_mac: mac, ciphertext: ct})
+    assert dec.timestamp == 1_700_000_000
+    assert dec.req_data == "hello test direct"
+    refute Map.has_key?(dec, :ciphertext)
+    refute Map.has_key?(dec, :cipher_mac)
+  end
+
+  test "decrypt_shared rejects a tampered MAC" do
+    {:ok, secret} = pki_secret()
+    {<<first, rest::binary>>, ct} = encrypt_shared(secret, 1, "x")
+    bad = <<rem(first + 1, 256), rest::binary>>
+
+    assert :meshcore_protocol.decrypt_shared(secret, %{cipher_mac: bad, ciphertext: ct}) ==
+             {:error, :bad_mac}
+  end
+
+  defp pki_secret do
+    {bob_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+    {_, alice_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    :meshcore_protocol.shared_secret(alice_priv, bob_pub)
+  end
+
+  defp encrypt_shared(secret, timestamp, req_data) do
+    inner = <<timestamp::32-little>> <> req_data
+    pad = rem(16 - rem(byte_size(inner), 16), 16)
+    padded = inner <> :binary.copy(<<0>>, pad)
+    <<aes_key::16-bytes, _::binary>> = secret
+    ct = :crypto.crypto_one_time(:aes_128_ecb, aes_key, padded, true)
+    <<mac::2-bytes, _::binary>> = :crypto.mac(:hmac, :sha256, secret, ct)
+    {mac, ct}
   end
 end

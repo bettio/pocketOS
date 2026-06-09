@@ -41,4 +41,18 @@ defmodule MeshcoreServerTest do
     assert logged.node_type == :chat
     assert logged.sig_ok == true
   end
+
+  test "for_log drops the anon_req sender pubkey and ciphertext" do
+    logged =
+      :meshcore_server.for_log(%{
+        type: :anon_req,
+        sender_pubkey: <<0::256>>,
+        ciphertext: <<1, 2, 3>>,
+        req_data: "hi"
+      })
+
+    refute Map.has_key?(logged, :sender_pubkey)
+    refute Map.has_key?(logged, :ciphertext)
+    assert logged.req_data == "hi"
+  end
 end
