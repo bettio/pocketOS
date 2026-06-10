@@ -3,6 +3,7 @@
 -export([
     parse/1,
     serialize/1,
+    packet_hash/1,
     decrypt/1,
     decrypt/2,
     decrypt_shared/2,
@@ -237,6 +238,20 @@ serialize_payload(anon_req, #{
     <<Dest, Sender/binary, Mac/binary, CT/binary>>;
 serialize_payload(_Type, #{payload := Payload}) ->
     Payload.
+
+%% === packet hash ===
+
+%% 8-byte dedup hash over the payload-type byte and the payload bytes. Route
+%% and path are excluded, so the same packet heard via another route matches.
+-spec packet_hash(packet()) -> binary().
+packet_hash(#{type := Type} = Packet) ->
+    Payload =
+        case Packet of
+            #{payload := Raw} -> Raw;
+            _ -> serialize_payload(Type, Packet)
+        end,
+    <<Hash:8/binary, _/binary>> = crypto:hash(sha256, <<(type_to_int(Type)), Payload/binary>>),
+    Hash.
 
 %% === decrypt ===
 

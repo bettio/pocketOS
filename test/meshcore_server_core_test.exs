@@ -171,6 +171,43 @@ defmodule MeshcoreServerCoreTest do
     assert :meshcore_server_core.enrich(pkt, channel_key()) == pkt
   end
 
+  # ---- handle_rx: dedup ----
+
+  test "rx drops a frame already seen" do
+    {:ok, pkt} = :meshcore_protocol.parse(@grp_txt)
+    {:ok, core1, [{:deliver, _}]} = :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core())
+    assert {:ok, _core2, []} = :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core1)
+  end
+
+  test "rx drops the same payload heard again via another route" do
+    <<0x15, 0x00, payload::binary>> = @grp_txt
+    {:ok, flood} = :meshcore_protocol.parse(@grp_txt)
+    {:ok, direct} = :meshcore_protocol.parse(<<0x16, 0x01, 0xAB, payload::binary>>)
+
+    {:ok, core1, [{:deliver, _}]} = :meshcore_server_core.handle_rx(flood, @attrs, %{}, core())
+    assert {:ok, _core2, []} = :meshcore_server_core.handle_rx(direct, @attrs, %{}, core1)
+  end
+
+  test "rx drops our own advert echoed back by a repeater" do
+    {core1, _} =
+      :meshcore_server_core.handle_periodic(%{wall_s: 1_700_000_000}, core(identity_opts()))
+
+    [wire] = drain(core1)
+    <<header, 0x00, payload::binary>> = wire
+    {:ok, echo} = :meshcore_protocol.parse(<<header, 0x01, 0xAB, payload::binary>>)
+
+    assert {:ok, _core2, []} = :meshcore_server_core.handle_rx(echo, @attrs, %{}, core1)
+  end
+
+  test "delivered frames carry the dedup packet hash" do
+    {:ok, pkt} = :meshcore_protocol.parse(@grp_txt)
+
+    {:ok, _core, [{:deliver, delivered}]} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core())
+
+    assert byte_size(delivered.packet_hash) == 8
+  end
+
   # ---- handle_rx: discover reply ----
 
   test "rx answers a matching network scan with a zero-hop DISCOVER_RESP" do
@@ -212,20 +249,27 @@ defmodule MeshcoreServerCoreTest do
 
   test "rx rate-limits discover replies to a fixed window" do
     opts = identity_opts()
-    {:ok, req} = :meshcore_protocol.parse(@control)
 
-    # five scans inside one window -> four replies, the fifth denied
+    # five scans (each with a fresh tag) inside one window -> four replies,
+    # the fifth denied
     c5 =
-      Enum.reduce(1..5, core(opts), fn _i, c ->
-        {:ok, c2, _} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(), c)
+      Enum.reduce(1..5, core(opts), fn i, c ->
+        {:ok, c2, _} = :meshcore_server_core.handle_rx(scan(i), @attrs, tx_env(), c)
         c2
       end)
 
     assert length(drain(c5)) == 4
 
     # a scan after the window lapses opens a fresh window and replies again
-    {:ok, c6, _} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(%{mono_ms: 130_000}), c5)
+    {:ok, c6, _} =
+      :meshcore_server_core.handle_rx(scan(6), @attrs, tx_env(%{mono_ms: 130_000}), c5)
+
     assert length(drain(c6)) == 5
+  end
+
+  defp scan(tag) do
+    {:ok, req} = :meshcore_protocol.parse(<<0x2E, 0x00, 0x80, 0xFF, tag::32>>)
+    req
   end
 
   test "rx does not answer a scan without a signing identity" do

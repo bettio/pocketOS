@@ -37,6 +37,7 @@
     name :: binary() | undefined,
     channel_key :: binary(),
     tx_queue = [] :: [tx_intent()],
+    seen = [] :: [binary()],
     %% discover-reply rate limiter: {window_start_ms, count}
     discover_rl = {0, 0} :: {integer(), non_neg_integer()},
     %% modulation params, for the airtime-derived discover-reply jitter
@@ -71,6 +72,7 @@
 -define(TX_BACKOFF_MAX_SHIFT, 4).
 
 -define(NODE_TYPE, chat).
+-define(SEEN_MAX, 128).
 -define(SNR_UNKNOWN, -128).
 -define(DISCOVER_RL_MAX, 4).
 -define(DISCOVER_RL_WINDOW_MS, 120000).
@@ -118,9 +120,20 @@ can_advertise(#core{public_key = Pub, private_key = Priv, name = Name}) ->
 %%------------------------------------------------------------------------------
 
 %% Enrich a parsed inbound frame and deliver it with the radio rssi/snr merged
-%% in. No forwarding or storage yet.
+%% in. Duplicates (same payload heard again, or our own TX echoed back by a
+%% repeater) are dropped. No forwarding or storage yet.
 -spec handle_rx(map(), map(), env(), core_state()) -> {ok, core_state(), [effect()]}.
-handle_rx(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) ->
+handle_rx(Packet, Attributes, Env, #core{seen = Seen} = Core0) ->
+    Hash = meshcore_protocol:packet_hash(Packet),
+    case seen_member(Hash, Seen) of
+        true ->
+            ?MESH_TRACE("[meshcore] rx dup dropped~n", []),
+            {ok, Core0, []};
+        false ->
+            handle_rx_new(Packet#{packet_hash => Hash}, Attributes, Env, remember_seen(Hash, Core0))
+    end.
+
+handle_rx_new(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) ->
     Delivered = with_attributes(enrich_rx(Packet, ChannelKey, Core0), Attributes),
     Core1 = maybe_reply_discover(Packet, Attributes, Env, Core0),
     {ok, Core1, [{deliver, Delivered}]}.
@@ -198,7 +211,7 @@ enqueue_advert(NowS, #core{public_key = Pub, private_key = Priv, name = Name} = 
     ),
     Payload = meshcore_protocol:serialize(Advert),
     ?MESH_TRACE("[meshcore] tx advert name=~p ts=~p bytes=~p~n", [Name, NowS, byte_size(Payload)]),
-    enqueue_tx(Payload, now, Core).
+    enqueue_tx(Payload, now, remember_seen(meshcore_protocol:packet_hash(Advert), Core)).
 
 %%------------------------------------------------------------------------------
 %% Discover reply
@@ -229,22 +242,26 @@ maybe_reply_discover(
                     ?MESH_TRACE("[meshcore] discover skip tag=~p filter=~p~n", [Tag, Filter]),
                     Core#core{discover_rl = Rl};
                 true ->
-                    Payload = discover_resp_payload(Tag, PrefixOnly, Attributes, Pub),
+                    Resp = discover_resp(Tag, PrefixOnly, Attributes, Pub),
+                    Payload = meshcore_protocol:serialize(Resp),
                     Rand = maps:get(rand22, Env),
                     Delay = discover_reply_delay(byte_size(Payload), Rand, Core),
                     ?MESH_TRACE(
                         "[meshcore] discover reply tag=~p snr=~p delay=~pms~n",
                         [Tag, maps:get(snr, Attributes, undefined), Delay]
                     ),
-                    enqueue_tx(Payload, NowMs + Delay, Core#core{discover_rl = Rl})
+                    Core1 = remember_seen(
+                        meshcore_protocol:packet_hash(Resp), Core#core{discover_rl = Rl}
+                    ),
+                    enqueue_tx(Payload, NowMs + Delay, Core1)
             end
     end;
 maybe_reply_discover(_Packet, _Attributes, _Env, Core) ->
     Core.
 
-%% Build + serialize a DISCOVER_RESP: our node type, the SNR we heard the request
-%% at (x4), the echoed tag, and our key (8-byte prefix when the request asks).
-discover_resp_payload(Tag, PrefixOnly, Attributes, Pub) ->
+%% Build a DISCOVER_RESP: our node type, the SNR we heard the request at (x4),
+%% the echoed tag, and our key (8-byte prefix when the request asks).
+discover_resp(Tag, PrefixOnly, Attributes, Pub) ->
     Key =
         case PrefixOnly of
             true ->
@@ -253,7 +270,7 @@ discover_resp_payload(Tag, PrefixOnly, Attributes, Pub) ->
             false ->
                 Pub
         end,
-    Resp = #{
+    #{
         route => direct,
         type => control,
         version => 0,
@@ -264,8 +281,7 @@ discover_resp_payload(Tag, PrefixOnly, Attributes, Pub) ->
         reported_snr => snr_byte(maps:get(snr, Attributes, undefined)),
         tag => Tag,
         public_key => Key
-    },
-    meshcore_protocol:serialize(Resp).
+    }.
 
 %% Respond only when the request's type filter selects our node type.
 responds_to(Filter, NodeType) ->
@@ -311,6 +327,21 @@ packet_airtime_ms(TotalBytes, #core{
     Den = 4 * (Sf - 2 * LowDataOpt),
     NPayload = 8 + max(ceil(Num / Den) * Cr, 0),
     trunc(TPreambleMs + NPayload * TSymMs).
+
+%%------------------------------------------------------------------------------
+%% Seen-frame dedup (a capped list of packet hashes, newest first)
+%%------------------------------------------------------------------------------
+
+seen_member(_Hash, []) -> false;
+seen_member(Hash, [Hash | _]) -> true;
+seen_member(Hash, [_ | T]) -> seen_member(Hash, T).
+
+remember_seen(Hash, #core{seen = Seen} = Core) ->
+    Core#core{seen = [Hash | seen_trim(Seen, ?SEEN_MAX - 1)]}.
+
+seen_trim(_List, 0) -> [];
+seen_trim([], _N) -> [];
+seen_trim([H | T], N) -> [H | seen_trim(T, N - 1)].
 
 %%------------------------------------------------------------------------------
 %% TX queue ADT (a plain FIFO list behind these accessors)

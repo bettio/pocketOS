@@ -88,6 +88,40 @@ defmodule MeshcoreProtocolTest do
     assert :meshcore_protocol.parse(<<>>) == {:error, :failed_meshcore_parse}
   end
 
+  test "packet_hash ignores route and path but tracks the payload" do
+    <<_header, _path_len, payload::binary>> = @f8
+    {:ok, flood} = :meshcore_protocol.parse(@f8)
+    {:ok, direct} = :meshcore_protocol.parse(<<0x16, 0x01, 0xAB, payload::binary>>)
+    {:ok, other} = :meshcore_protocol.parse(@f10)
+
+    assert byte_size(:meshcore_protocol.packet_hash(flood)) == 8
+    assert :meshcore_protocol.packet_hash(direct) == :meshcore_protocol.packet_hash(flood)
+    refute :meshcore_protocol.packet_hash(other) == :meshcore_protocol.packet_hash(flood)
+  end
+
+  test "packet_hash matches between a built packet and its parsed wire form" do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    appdata = :meshcore_protocol.encode_advert_appdata(%{node_type: :chat, name: "t"})
+
+    built =
+      :meshcore_protocol.sign_advert(
+        %{
+          route: :flood,
+          type: :advert,
+          version: 0,
+          hash_size: 1,
+          path: <<>>,
+          public_key: pub,
+          timestamp: 123,
+          appdata: appdata
+        },
+        priv
+      )
+
+    {:ok, parsed} = :meshcore_protocol.parse(:meshcore_protocol.serialize(built))
+    assert :meshcore_protocol.packet_hash(parsed) == :meshcore_protocol.packet_hash(built)
+  end
+
   test "CONTROL discover_req decodes route, sub_type, type_filter and tag" do
     {:ok, pkt} = :meshcore_protocol.parse(@f1)
     assert pkt.route == :direct
