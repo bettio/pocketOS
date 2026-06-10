@@ -11,8 +11,9 @@
 %% state; other side effects (`set_timer', `deliver') flow back as an `Effects'
 %% list the gen_server runs.
 %%
-%% The node's only active job today is to
-%% broadcast a signed flood ADVERT every 60 s.
+%% The node broadcasts a signed flood ADVERT
+%% every 60 s, answers network scans, learns contacts from signed adverts and
+%% decrypts group texts, anonymous requests and direct messages.
 %%
 
 -include_lib("mesh_trace.hrl").
@@ -38,6 +39,7 @@
     channel_key :: binary(),
     tx_queue = [] :: [tx_intent()],
     seen = [] :: [binary()],
+    contacts = [] :: [{binary(), map()}],
     %% discover-reply rate limiter: {window_start_ms, count}
     discover_rl = {0, 0} :: {integer(), non_neg_integer()},
     %% modulation params, for the airtime-derived discover-reply jitter
@@ -73,6 +75,7 @@
 
 -define(NODE_TYPE, chat).
 -define(SEEN_MAX, 128).
+-define(CONTACTS_MAX, 64).
 -define(SNR_UNKNOWN, -128).
 -define(DISCOVER_RL_MAX, 4).
 -define(DISCOVER_RL_WINDOW_MS, 120000).
@@ -119,9 +122,10 @@ can_advertise(#core{public_key = Pub, private_key = Priv, name = Name}) ->
 %% Receive
 %%------------------------------------------------------------------------------
 
-%% Enrich a parsed inbound frame and deliver it with the radio rssi/snr merged
-%% in. Duplicates (same payload heard again, or our own TX echoed back by a
-%% repeater) are dropped. No forwarding or storage yet.
+%% Enrich a parsed inbound frame, learn the contact it may announce, and
+%% deliver it with the radio rssi/snr merged in. Duplicates (same payload
+%% heard again, or our own TX echoed back by a repeater) are dropped. No
+%% forwarding yet.
 -spec handle_rx(map(), map(), env(), core_state()) -> {ok, core_state(), [effect()]}.
 handle_rx(Packet, Attributes, Env, #core{seen = Seen} = Core0) ->
     Hash = meshcore_protocol:packet_hash(Packet),
@@ -134,14 +138,18 @@ handle_rx(Packet, Attributes, Env, #core{seen = Seen} = Core0) ->
     end.
 
 handle_rx_new(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) ->
-    Delivered = with_attributes(enrich_rx(Packet, ChannelKey, Core0), Attributes),
-    Core1 = maybe_reply_discover(Packet, Attributes, Env, Core0),
-    {ok, Core1, [{deliver, Delivered}]}.
+    {Enriched, Core1} = enrich_rx(Packet, ChannelKey, Core0),
+    Core2 = maybe_learn_contact(Enriched, Env, Core1),
+    Delivered = with_attributes(Enriched, Attributes),
+    Core3 = maybe_reply_discover(Packet, Attributes, Env, Core2),
+    {ok, Core3, [{deliver, Delivered}]}.
 
 enrich_rx(#{type := anon_req} = Packet, _ChannelKey, Core) ->
-    enrich_anon(Packet, Core);
-enrich_rx(Packet, ChannelKey, _Core) ->
-    enrich(Packet, ChannelKey).
+    {enrich_anon(Packet, Core), Core};
+enrich_rx(#{type := txt_msg} = Packet, _ChannelKey, Core) ->
+    enrich_dm(Packet, Core);
+enrich_rx(Packet, ChannelKey, Core) ->
+    {enrich(Packet, ChannelKey), Core}.
 
 with_attributes(Packet, Attributes) ->
     Packet#{
@@ -177,6 +185,114 @@ enrich_anon(
     end;
 enrich_anon(Packet, _Core) ->
     Packet.
+
+enrich_dm(
+    #{dest_hash := DestHash, src_hash := SrcHash} = Packet,
+    #core{public_key = <<OurFirst, _/binary>>, private_key = Priv, contacts = Contacts} = Core
+) when is_binary(Priv), DestHash =:= OurFirst ->
+    case contact_candidates(SrcHash, Contacts) of
+        [] ->
+            ?MESH_TRACE("[meshcore] dm from unknown contact src=~p~n", [SrcHash]),
+            {Packet#{decrypt_error => no_contact}, Core};
+        Candidates ->
+            try_dm(Candidates, Packet, Core)
+    end;
+enrich_dm(Packet, Core) ->
+    {Packet, Core}.
+
+try_dm([], Packet, Core) ->
+    {Packet#{decrypt_error => bad_mac}, Core};
+try_dm([{Pub, Contact} | Rest], Packet, #core{private_key = Priv} = Core) ->
+    case contact_secret(Contact, Priv, Pub) of
+        {error, _Reason} ->
+            try_dm(Rest, Packet, Core);
+        {ok, Secret} ->
+            case meshcore_protocol:decrypt_shared(Secret, Packet) of
+                {ok, Decrypted} ->
+                    {with_sender_name(Decrypted#{sender_pubkey => Pub}, Contact),
+                        cache_secret(Pub, Contact, Secret, Core)};
+                {error, _} ->
+                    try_dm(Rest, Packet, Core)
+            end
+    end.
+
+contact_secret(#{secret := Secret}, _Priv, _Pub) when is_binary(Secret) ->
+    {ok, Secret};
+contact_secret(_Contact, Priv, Pub) ->
+    meshcore_protocol:shared_secret(Priv, Pub).
+
+cache_secret(Pub, Contact, Secret, #core{contacts = Contacts} = Core) ->
+    Core#core{contacts = contact_store(Pub, Contact#{secret => Secret}, Contacts)}.
+
+with_sender_name(Packet, Contact) ->
+    case maps:get(name, Contact, undefined) of
+        undefined -> Packet;
+        Name -> Packet#{sender_name => Name}
+    end.
+
+%%------------------------------------------------------------------------------
+%% Contacts (a capped list of {PublicKey, Contact} pairs from signed adverts)
+%%------------------------------------------------------------------------------
+
+maybe_learn_contact(#{type := advert, sig_ok := true, public_key := Pub} = Packet, Env, Core) when
+    Pub =/= Core#core.public_key
+->
+    learn_contact(Packet, maps:get(mono_ms, Env, 0), Core);
+maybe_learn_contact(_Packet, _Env, Core) ->
+    Core.
+
+learn_contact(
+    #{public_key := Pub, timestamp := Ts} = Packet, NowMs, #core{contacts = Contacts} = Core
+) ->
+    case contact_find(Pub, Contacts) of
+        {ok, #{adv_timestamp := Seen}} when Seen >= Ts ->
+            Core;
+        {ok, Contact} ->
+            Core#core{contacts = contact_store(Pub, refresh(Contact, Packet, Ts, NowMs), Contacts)};
+        error ->
+            Contact = refresh(#{}, Packet, Ts, NowMs),
+            ?MESH_TRACE("[meshcore] contact ~p type=~p~n", [
+                maps:get(name, Contact, undefined), maps:get(node_type, Contact, undefined)
+            ]),
+            Core#core{contacts = contact_store(Pub, Contact, contact_make_room(Contacts))}
+    end.
+
+refresh(Contact, Packet, Ts, NowMs) ->
+    Contact#{
+        name => maps:get(name, Packet, maps:get(name, Contact, undefined)),
+        node_type => maps:get(node_type, Packet, maps:get(node_type, Contact, undefined)),
+        adv_timestamp => Ts,
+        last_heard => NowMs
+    }.
+
+contact_find(Pub, [{Pub, Contact} | _]) -> {ok, Contact};
+contact_find(Pub, [_ | T]) -> contact_find(Pub, T);
+contact_find(_Pub, []) -> error.
+
+contact_store(Pub, Contact, Contacts) ->
+    [{Pub, Contact} | contact_delete(Pub, Contacts)].
+
+contact_delete(Pub, [{Pub, _} | T]) -> T;
+contact_delete(Pub, [H | T]) -> [H | contact_delete(Pub, T)];
+contact_delete(_Pub, []) -> [].
+
+contact_candidates(SrcHash, Contacts) ->
+    [{Pub, C} || {<<First, _/binary>> = Pub, C} <- Contacts, First =:= SrcHash].
+
+contact_make_room(Contacts) when length(Contacts) < ?CONTACTS_MAX ->
+    Contacts;
+contact_make_room([First | Rest]) ->
+    {OldestPub, _} = oldest_contact(Rest, First),
+    contact_delete(OldestPub, [First | Rest]).
+
+oldest_contact([], Oldest) ->
+    Oldest;
+oldest_contact([{_, #{last_heard := H}} = C | T], {_, #{last_heard := OldestH}}) when
+    H < OldestH
+->
+    oldest_contact(T, C);
+oldest_contact([_ | T], Oldest) ->
+    oldest_contact(T, Oldest).
 
 %%------------------------------------------------------------------------------
 %% Periodic advert

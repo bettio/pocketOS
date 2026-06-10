@@ -358,6 +358,198 @@ defmodule MeshcoreServerCoreTest do
     assert drain(core1) == []
   end
 
+  # ---- handle_rx: direct messages ----
+
+  test "rx decrypts a direct message from a contact learned via advert" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, adv} = :meshcore_protocol.parse(advert_frame(sender_pub, sender_priv, "testd", 100))
+    {:ok, core1, _} = :meshcore_server_core.handle_rx(adv, @attrs, tx_env(), core(opts))
+
+    dm = dm_frame(our_pub, sender_pub, sender_priv, "hello test direct", 1_700_000_000)
+    {:ok, pkt} = :meshcore_protocol.parse(dm)
+    {:ok, core2, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [{:deliver, delivered}] = effects
+    assert delivered.type == :txt_msg
+    assert delivered.text == "hello test direct"
+    assert delivered.timestamp == 1_700_000_000
+    assert delivered.txt_type == 0
+    assert delivered.sender_pubkey == sender_pub
+    assert delivered.sender_name == "testd"
+    refute Map.has_key?(delivered, :ciphertext)
+    refute Map.has_key?(delivered, :decrypt_error)
+
+    assert drain(core2) == []
+  end
+
+  test "rx flags a direct message from an unknown sender" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, sender_pub, sender_priv, "x", 1))
+
+    {:ok, _core, [{:deliver, delivered}]} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
+
+    assert delivered.decrypt_error == :no_contact
+    assert Map.has_key?(delivered, :ciphertext)
+  end
+
+  test "rx flags a direct message that decrypts under no known contact" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    {_imp_pub, imp_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, adv} = :meshcore_protocol.parse(advert_frame(sender_pub, sender_priv, "testd", 100))
+    {:ok, core1, _} = :meshcore_server_core.handle_rx(adv, @attrs, tx_env(), core(opts))
+
+    {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, sender_pub, imp_priv, "x", 1))
+
+    {:ok, _core, [{:deliver, delivered}]} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert delivered.decrypt_error == :bad_mac
+    refute Map.has_key?(delivered, :text)
+  end
+
+  test "rx passes through a direct message not addressed to us" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    <<h, pl, dest, rest::binary>> = dm_frame(our_pub, sender_pub, sender_priv, "x", 1)
+    {:ok, pkt} = :meshcore_protocol.parse(<<h, pl, rem(dest + 1, 256), rest::binary>>)
+
+    {:ok, _core, [{:deliver, delivered}]} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
+
+    refute Map.has_key?(delivered, :decrypt_error)
+    refute Map.has_key?(delivered, :text)
+  end
+
+  test "rx resolves src_hash collisions by trying every matching contact" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {a_pub, a_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    <<first, _::binary>> = a_pub
+    {b_pub, b_priv} = keypair_with_first(first)
+
+    {:ok, adv_a} = :meshcore_protocol.parse(advert_frame(a_pub, a_priv, "a", 100))
+    {:ok, adv_b} = :meshcore_protocol.parse(advert_frame(b_pub, b_priv, "b", 100))
+    {:ok, c1, _} = :meshcore_server_core.handle_rx(adv_a, @attrs, tx_env(), core(opts))
+    {:ok, c2, _} = :meshcore_server_core.handle_rx(adv_b, @attrs, tx_env(), c1)
+
+    {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, a_pub, a_priv, "from a", 1))
+
+    {:ok, _c3, [{:deliver, delivered}]} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), c2)
+
+    assert delivered.text == "from a"
+    assert delivered.sender_name == "a"
+    assert delivered.sender_pubkey == a_pub
+  end
+
+  test "rx ignores a replayed advert with an older timestamp" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, newer} =
+      :meshcore_protocol.parse(advert_frame(sender_pub, sender_priv, "new-name", 200))
+
+    {:ok, older} =
+      :meshcore_protocol.parse(advert_frame(sender_pub, sender_priv, "old-name", 100))
+
+    {:ok, c1, _} = :meshcore_server_core.handle_rx(newer, @attrs, tx_env(), core(opts))
+    {:ok, c2, [{:deliver, _}]} = :meshcore_server_core.handle_rx(older, @attrs, tx_env(), c1)
+
+    {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, sender_pub, sender_priv, "x", 1))
+
+    {:ok, _c3, [{:deliver, delivered}]} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), c2)
+
+    assert delivered.sender_name == "new-name"
+  end
+
+  test "the contact table caps out by evicting the least recently heard" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {first_pub, first_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, adv} = :meshcore_protocol.parse(advert_frame(first_pub, first_priv, "first", 100))
+    {:ok, c0, _} = :meshcore_server_core.handle_rx(adv, @attrs, tx_env(%{mono_ms: 0}), core(opts))
+
+    c64 =
+      Enum.reduce(1..64, c0, fn i, c ->
+        {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+        {:ok, a} = :meshcore_protocol.parse(advert_frame(pub, priv, "n#{i}", 100 + i))
+        {:ok, c2, _} = :meshcore_server_core.handle_rx(a, @attrs, tx_env(%{mono_ms: i}), c)
+        c2
+      end)
+
+    {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, first_pub, first_priv, "x", 1))
+
+    {:ok, _c, [{:deliver, delivered}]} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), c64)
+
+    assert Map.has_key?(delivered, :decrypt_error)
+    refute Map.has_key?(delivered, :text)
+  end
+
+  defp advert_frame(pub, priv, name, timestamp) do
+    appdata = :meshcore_protocol.encode_advert_appdata(%{node_type: :chat, name: name})
+
+    :meshcore_protocol.serialize(
+      :meshcore_protocol.sign_advert(
+        %{
+          route: :flood,
+          type: :advert,
+          version: 0,
+          hash_size: 1,
+          path: <<>>,
+          public_key: pub,
+          timestamp: timestamp,
+          appdata: appdata
+        },
+        priv
+      )
+    )
+  end
+
+  defp dm_frame(recipient_pub, src_pub, seal_priv, text, timestamp) do
+    {:ok, secret} = :meshcore_protocol.shared_secret(seal_priv, recipient_pub)
+    <<dest_hash, _::binary>> = recipient_pub
+    <<src_hash, _::binary>> = src_pub
+
+    :meshcore_protocol.serialize(
+      :meshcore_protocol.encrypt_shared(secret, %{
+        route: :flood,
+        type: :txt_msg,
+        version: 0,
+        hash_size: 1,
+        path: <<>>,
+        dest_hash: dest_hash,
+        src_hash: src_hash,
+        timestamp: timestamp,
+        text: text
+      })
+    )
+  end
+
+  defp keypair_with_first(byte) do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    case pub do
+      <<^byte, _::binary>> -> {pub, priv}
+      _ -> keypair_with_first(byte)
+    end
+  end
+
   defp anon_req_frame(recipient_pub, sender_pub, sender_priv, timestamp, req_data) do
     {:ok, secret} = :meshcore_protocol.shared_secret(sender_priv, recipient_pub)
     inner = <<timestamp::32-little>> <> req_data
