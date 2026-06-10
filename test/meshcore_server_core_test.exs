@@ -382,7 +382,7 @@ defmodule MeshcoreServerCoreTest do
     refute Map.has_key?(delivered, :ciphertext)
     refute Map.has_key?(delivered, :decrypt_error)
 
-    assert drain(core2) == []
+    assert [_ack] = drain(core2)
   end
 
   test "rx flags a direct message from an unknown sender" do
@@ -392,11 +392,12 @@ defmodule MeshcoreServerCoreTest do
 
     {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, sender_pub, sender_priv, "x", 1))
 
-    {:ok, _core, [{:deliver, delivered}]} =
+    {:ok, core2, [{:deliver, delivered}]} =
       :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
 
     assert delivered.decrypt_error == :no_contact
     assert Map.has_key?(delivered, :ciphertext)
+    assert drain(core2) == []
   end
 
   test "rx flags a direct message that decrypts under no known contact" do
@@ -410,11 +411,12 @@ defmodule MeshcoreServerCoreTest do
 
     {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, sender_pub, imp_priv, "x", 1))
 
-    {:ok, _core, [{:deliver, delivered}]} =
+    {:ok, core2, [{:deliver, delivered}]} =
       :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
 
     assert delivered.decrypt_error == :bad_mac
     refute Map.has_key?(delivered, :text)
+    assert drain(core2) == []
   end
 
   test "rx passes through a direct message not addressed to us" do
@@ -425,11 +427,12 @@ defmodule MeshcoreServerCoreTest do
     <<h, pl, dest, rest::binary>> = dm_frame(our_pub, sender_pub, sender_priv, "x", 1)
     {:ok, pkt} = :meshcore_protocol.parse(<<h, pl, rem(dest + 1, 256), rest::binary>>)
 
-    {:ok, _core, [{:deliver, delivered}]} =
+    {:ok, core2, [{:deliver, delivered}]} =
       :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
 
     refute Map.has_key?(delivered, :decrypt_error)
     refute Map.has_key?(delivered, :text)
+    assert drain(core2) == []
   end
 
   test "rx resolves src_hash collisions by trying every matching contact" do
@@ -501,6 +504,127 @@ defmodule MeshcoreServerCoreTest do
     refute Map.has_key?(delivered, :text)
   end
 
+  # ---- direct-message ack ----
+
+  test "rx acks a flood direct message with a path return" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+
+    dm = dm_frame(our_pub, sender_pub, sender_priv, "hello test direct", 1_700_000_000)
+    {:ok, pkt} = :meshcore_protocol.parse(dm)
+
+    {:ok, core2, _} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(%{rand22: 0x1AB}), core1)
+
+    # scheduled 200 ms after rx (mono_ms 5_000)
+    {[], core3} = :meshcore_server_core.take_due(core2, 5_199)
+    {[intent], _} = :meshcore_server_core.take_due(core3, 5_200)
+
+    {:ok, reply} = :meshcore_protocol.parse(intent.payload)
+    assert reply.type == :path
+    assert reply.route == :flood
+    assert reply.path == <<>>
+    <<sender_first, _::binary>> = sender_pub
+    <<our_first, _::binary>> = our_pub
+    assert reply.dest_hash == sender_first
+    assert reply.src_hash == our_first
+
+    {:ok, secret} = :meshcore_protocol.shared_secret(sender_priv, our_pub)
+    <<mac::2-bytes, _::binary>> = :crypto.mac(:hmac, :sha256, secret, reply.ciphertext)
+    assert reply.cipher_mac == mac
+
+    <<aes_key::16-bytes, _::binary>> = secret
+    plain = :crypto.crypto_one_time(:aes_128_ecb, aes_key, reply.ciphertext, false)
+    expect4 = expect_ack4(1_700_000_000, "hello test direct", sender_pub)
+    assert plain == <<0x00, 3>> <> expect4 <> <<0, 0xAB>> <> <<0::size(8 * 8)>>
+  end
+
+  test "rx echoes a multi-hop route back in the path return" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+
+    dm = dm_frame(our_pub, sender_pub, sender_priv, "x", 1, %{path: <<0xAA, 0xBB>>})
+    {:ok, pkt} = :meshcore_protocol.parse(dm)
+    {:ok, core2, _} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [wire] = drain(core2)
+    {:ok, reply} = :meshcore_protocol.parse(wire)
+    {:ok, secret} = :meshcore_protocol.shared_secret(sender_priv, our_pub)
+    <<aes_key::16-bytes, _::binary>> = secret
+    plain = :crypto.crypto_one_time(:aes_128_ecb, aes_key, reply.ciphertext, false)
+    assert <<0x02, 0xAA, 0xBB, 3, _::binary>> = plain
+  end
+
+  test "rx acks a direct-routed direct message with a discrete flooded ack" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+
+    dm = dm_frame(our_pub, sender_pub, sender_priv, "another direct", 99, %{route: :direct})
+    {:ok, pkt} = :meshcore_protocol.parse(dm)
+
+    {:ok, core2, _} =
+      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(%{rand22: 0x1AB}), core1)
+
+    {[], core3} = :meshcore_server_core.take_due(core2, 5_199)
+    {[intent], _} = :meshcore_server_core.take_due(core3, 5_200)
+
+    {:ok, reply} = :meshcore_protocol.parse(intent.payload)
+    assert reply.type == :ack
+    assert reply.route == :flood
+    assert reply.path == <<>>
+    assert reply.ack == expect_ack4(99, "another direct", sender_pub) <> <<0, 0xAB>>
+  end
+
+  test "the ack carries the attempt byte hidden after the text's NUL" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+
+    dm = dm_frame(our_pub, sender_pub, sender_priv, "hi" <> <<0, 5>>, 1)
+    {:ok, pkt} = :meshcore_protocol.parse(dm)
+    {:ok, core2, _} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [wire] = drain(core2)
+    {:ok, reply} = :meshcore_protocol.parse(wire)
+    {:ok, secret} = :meshcore_protocol.shared_secret(sender_priv, our_pub)
+    <<aes_key::16-bytes, _::binary>> = secret
+    plain = :crypto.crypto_one_time(:aes_128_ecb, aes_key, reply.ciphertext, false)
+    expect4 = expect_ack4(1, "hi", sender_pub)
+    assert <<0x00, 3, ^expect4::4-bytes, 5, 0, _::binary>> = plain
+  end
+
+  test "rx drops its own ack echoed back by a repeater" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+
+    dm = dm_frame(our_pub, sender_pub, sender_priv, "x", 1)
+    {:ok, pkt} = :meshcore_protocol.parse(dm)
+    {:ok, core2, _} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [wire] = drain(core2)
+    {:ok, echo} = :meshcore_protocol.parse(wire)
+    assert {:ok, _core3, []} = :meshcore_server_core.handle_rx(echo, @attrs, tx_env(), core2)
+  end
+
+  test "rx does not ack a non-plain direct message" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+
+    dm = dm_frame(our_pub, sender_pub, sender_priv, "cmd", 1, %{txt_type: 1})
+    {:ok, pkt} = :meshcore_protocol.parse(dm)
+    {:ok, core2, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [{:deliver, delivered}] = effects
+    assert delivered.txt_type == 1
+    assert drain(core2) == []
+  end
+
+  defp core_with_contact do
+    opts = identity_opts()
+    {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    {:ok, adv} = :meshcore_protocol.parse(advert_frame(sender_pub, sender_priv, "testd", 100))
+    {:ok, core1, _} = :meshcore_server_core.handle_rx(adv, @attrs, tx_env(), core(opts))
+    {core1, Keyword.fetch!(opts, :public_key), sender_pub, sender_priv}
+  end
+
+  # Recomputed from scratch: hash of timestamp | flags | text | sender key.
+  defp expect_ack4(timestamp, text, sender_pub) do
+    binary_part(:crypto.hash(:sha256, <<timestamp::32-little, 0>> <> text <> sender_pub), 0, 4)
+  end
+
   defp advert_frame(pub, priv, name, timestamp) do
     appdata = :meshcore_protocol.encode_advert_appdata(%{node_type: :chat, name: name})
 
@@ -521,23 +645,29 @@ defmodule MeshcoreServerCoreTest do
     )
   end
 
-  defp dm_frame(recipient_pub, src_pub, seal_priv, text, timestamp) do
+  defp dm_frame(recipient_pub, src_pub, seal_priv, text, timestamp, extra \\ %{}) do
     {:ok, secret} = :meshcore_protocol.shared_secret(seal_priv, recipient_pub)
     <<dest_hash, _::binary>> = recipient_pub
     <<src_hash, _::binary>> = src_pub
 
     :meshcore_protocol.serialize(
-      :meshcore_protocol.encrypt_shared(secret, %{
-        route: :flood,
-        type: :txt_msg,
-        version: 0,
-        hash_size: 1,
-        path: <<>>,
-        dest_hash: dest_hash,
-        src_hash: src_hash,
-        timestamp: timestamp,
-        text: text
-      })
+      :meshcore_protocol.encrypt_shared(
+        secret,
+        Map.merge(
+          %{
+            route: :flood,
+            type: :txt_msg,
+            version: 0,
+            hash_size: 1,
+            path: <<>>,
+            dest_hash: dest_hash,
+            src_hash: src_hash,
+            timestamp: timestamp,
+            text: text
+          },
+          extra
+        )
+      )
     )
   end
 

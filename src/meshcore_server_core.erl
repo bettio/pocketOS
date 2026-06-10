@@ -83,6 +83,8 @@
 -define(DISCOVER_SLOTS, 5).
 -define(DISCOVER_DELAY_WIDEN, 4).
 
+-define(ACK_DELAY_MS, 200).
+
 %%------------------------------------------------------------------------------
 %% Construction
 %%------------------------------------------------------------------------------
@@ -142,7 +144,8 @@ handle_rx_new(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) 
     Core2 = maybe_learn_contact(Enriched, Env, Core1),
     Delivered = with_attributes(Enriched, Attributes),
     Core3 = maybe_reply_discover(Packet, Attributes, Env, Core2),
-    {ok, Core3, [{deliver, Delivered}]}.
+    Core4 = maybe_ack_dm(Enriched, Env, Core3),
+    {ok, Core4, [{deliver, Delivered}]}.
 
 enrich_rx(#{type := anon_req} = Packet, _ChannelKey, Core) ->
     {enrich_anon(Packet, Core), Core};
@@ -443,6 +446,52 @@ packet_airtime_ms(TotalBytes, #core{
     Den = 4 * (Sf - 2 * LowDataOpt),
     NPayload = 8 + max(ceil(Num / Den) * Cr, 0),
     trunc(TPreambleMs + NPayload * TSymMs).
+
+%%------------------------------------------------------------------------------
+%% Direct-message ack
+%%------------------------------------------------------------------------------
+
+%% Acknowledge a successfully decrypted plain direct message: a flood-routed
+%% one with a path return that teaches the sender the route here and bundles
+%% the ack, a direct-routed one with a discrete flooded ack packet.
+maybe_ack_dm(
+    #{type := txt_msg, txt_type := 0, sender_pubkey := SenderPub, route := Route} = Dm, Env, Core
+) ->
+    #{mono_ms := NowMs, rand22 := Rand} = Env,
+    Ack = meshcore_protocol:ack_payload(Dm, SenderPub, Rand band 16#FF),
+    ?MESH_TRACE("[meshcore] dm ack route=~p~n", [Route]),
+    enqueue_reply(ack_reply(Route, Dm, SenderPub, Ack, Core), NowMs + ?ACK_DELAY_MS, Core);
+maybe_ack_dm(_Packet, _Env, Core) ->
+    Core.
+
+ack_reply(
+    Route,
+    #{path := Path, hash_size := HashSize},
+    SenderPub,
+    Ack,
+    #core{public_key = <<OurFirst, _/binary>>, contacts = Contacts}
+) when Route =:= flood; Route =:= transport_flood ->
+    <<SenderFirst, _/binary>> = SenderPub,
+    {ok, #{secret := Secret}} = contact_find(SenderPub, Contacts),
+    meshcore_protocol:encrypt_shared(Secret, #{
+        route => flood,
+        type => path,
+        version => 0,
+        hash_size => 1,
+        path => <<>>,
+        dest_hash => SenderFirst,
+        src_hash => OurFirst,
+        return_path => Path,
+        return_hash_size => HashSize,
+        extra_type => ack,
+        extra => Ack
+    });
+ack_reply(Route, _Dm, _SenderPub, Ack, _Core) when Route =:= direct; Route =:= transport_direct ->
+    #{route => flood, type => ack, version => 0, hash_size => 1, path => <<>>, ack => Ack}.
+
+enqueue_reply(Packet, NotBefore, Core) ->
+    Payload = meshcore_protocol:serialize(Packet),
+    enqueue_tx(Payload, NotBefore, remember_seen(meshcore_protocol:packet_hash(Packet), Core)).
 
 %%------------------------------------------------------------------------------
 %% Seen-frame dedup (a capped list of packet hashes, newest first)
