@@ -317,6 +317,7 @@ defmodule UI.MeshMessages do
 
   def handle_event(:ui, :shown, ui, state) do
     :micronesia.subscribe({:table, :meshtastic_message, :simple})
+    :micronesia.subscribe({:table, :meshcore_message, :simple})
 
     {updated_ui, new_state} = reload_model(ui, %{state | screen: :inbox})
 
@@ -483,12 +484,22 @@ defmodule UI.MeshMessages do
   end
 
   defp reload_model(ui, state) do
-    inbox_model =
+    meshtastic_inbox =
       :micronesia.all(:meshtastic_message)
       |> Enum.map(fn {:meshtastic_message, packet_id, payload} ->
         %{
           id: packet_id,
           text: payload,
+          source: {:pocket_os, "icons/32/generic/new_mail.rgba"}
+        }
+      end)
+
+    meshcore_inbox =
+      :micronesia.all(:meshcore_message)
+      |> Enum.map(fn {:meshcore_message, id, text} ->
+        %{
+          id: id,
+          text: text,
           source: {:pocket_os, "icons/32/generic/new_mail.rgba"}
         }
       end)
@@ -505,7 +516,7 @@ defmodule UI.MeshMessages do
       source: {:pocket_os, "icons/32/generic/mail_doc.rgba"}
     }
 
-    list_model = [exit, compose | inbox_model]
+    list_model = [exit, compose | meshtastic_inbox ++ meshcore_inbox]
 
     updated_ui =
       UIServer.begin_widget_state_update(ui)
