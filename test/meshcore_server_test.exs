@@ -19,6 +19,20 @@ defmodule MeshcoreServerTest do
 
   defp channel_key, do: :meshcore_protocol.default_public_channel_key()
 
+  defmodule CbSink do
+    def message_cb(pkt), do: send(:meshcore_cb_sink, {:message_cb, pkt})
+  end
+
+  test "delivered frames are handed to the callbacks module" do
+    Process.register(self(), :meshcore_cb_sink)
+    {:ok, srv} = :meshcore_server.start_link({:test_iface, :test_mod, self()}, callbacks: CbSink)
+
+    :ok =
+      :meshcore_server.handle_payload(srv, {:test_mod, self()}, @grp_txt, %{rssi: -66, snr: 6})
+
+    assert_receive {:message_cb, %{type: :grp_txt, text: "testd: hello", rssi: -66}}
+  end
+
   test "handle_payload consumes (:ok) frames that parse and passes through (:next) garbage" do
     {:ok, srv} = :meshcore_server.start_link({:test_iface, :test_mod, self()}, [])
     iface = {:test_mod, self()}

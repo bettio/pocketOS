@@ -8,7 +8,8 @@
 %% timers, the clock and randomness. Each callback injects the impurity the core
 %% needs as data, calls one pure core function, runs the returned effects, and
 %% pumps the core's tx_queue out to the radio. All packet logic lives in the
-%% core; see meshcore_server_core.erl.
+%% core; see meshcore_server_core.erl. Delivered frames are logged and handed
+%% to the optional `callbacks' module.
 %%
 
 -export([
@@ -29,7 +30,7 @@
     handle_info/2
 ]).
 
--record(state, {radio, core}).
+-record(state, {radio, callbacks, core}).
 
 start_link(Radio, Opts) ->
     gen_server:start_link(?MODULE, [Radio, Opts], []).
@@ -44,20 +45,21 @@ init([Radio, Opts]) ->
     erlang:display(
         {meshcore_crypto, eddsa_available, meshcore_protocol:eddsa_available(), crypto:info_lib()}
     ),
+    Callbacks = proplists:get_value(callbacks, Opts),
     {Core, Effects} = meshcore_server_core:init(Opts),
-    run_effects(Effects),
-    {ok, #state{radio = Radio, core = Core}}.
+    run_effects(Effects, Callbacks),
+    {ok, #state{radio = Radio, callbacks = Callbacks, core = Core}}.
 
 handle_call(
     {handle_payload, {_IfaceId, _Pid}, Payload, Attributes},
     _From,
-    #state{core = Core0} = State
+    #state{callbacks = Callbacks, core = Core0} = State
 ) ->
     case meshcore_protocol:parse(Payload) of
         {ok, Packet} ->
             Env = #{mono_ms => erlang:monotonic_time(millisecond), rand22 => rand22()},
             {ok, Core1, Effects} = meshcore_server_core:handle_rx(Packet, Attributes, Env, Core0),
-            run_effects(Effects),
+            run_effects(Effects, Callbacks),
             State1 = pump_tx(State#state{core = Core1}),
             {reply, ok, State1};
         _Invalid ->
@@ -69,10 +71,10 @@ handle_call(_Msg, _From, State) ->
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
-handle_info(periodic, #state{core = Core0} = State) ->
+handle_info(periodic, #state{callbacks = Callbacks, core = Core0} = State) ->
     Env = #{wall_s => erlang:system_time(second)},
     {Core1, Effects} = meshcore_server_core:handle_periodic(Env, Core0),
-    run_effects(Effects),
+    run_effects(Effects, Callbacks),
     State1 = pump_tx(State#state{core = Core1}),
     {noreply, State1};
 handle_info(tx_pump, State) ->
@@ -84,14 +86,20 @@ handle_info(_Msg, State) ->
 %% Effect execution
 %%------------------------------------------------------------------------------
 
-run_effects([]) ->
+run_effects([], _Callbacks) ->
     ok;
-run_effects([{set_timer, Ms, Msg} | Rest]) ->
+run_effects([{set_timer, Ms, Msg} | Rest], Callbacks) ->
     erlang:send_after(Ms, self(), Msg),
-    run_effects(Rest);
-run_effects([{deliver, Packet} | Rest]) ->
+    run_effects(Rest, Callbacks);
+run_effects([{deliver, Packet} | Rest], Callbacks) ->
     erlang:display({meshcore_rx, for_log(Packet)}),
-    run_effects(Rest).
+    deliver(Callbacks, Packet),
+    run_effects(Rest, Callbacks).
+
+deliver(undefined, _Packet) ->
+    ok;
+deliver(Callbacks, Packet) ->
+    Callbacks:message_cb(Packet).
 
 pump_tx(#state{radio = {_RadioId, RadioModule, Radio}, core = Core0} = State) ->
     Now = erlang:monotonic_time(millisecond),
