@@ -427,6 +427,109 @@ defmodule MeshcoreProtocolTest do
     assert dec.req_data == <<1, 2, 3>>
   end
 
+  test "ack_payload hashes the message prefix with the sender key" do
+    msg = %{timestamp: 1_700_000_123, txt_type: 0, attempt: 1, text: "hello test direct"}
+
+    expected =
+      binary_part(
+        :crypto.hash(
+          :sha256,
+          <<1_700_000_123::32-little, 0::6, 1::2, "hello test direct">> <> @public_key
+        ),
+        0,
+        4
+      )
+
+    assert :meshcore_protocol.ack_payload(msg, @public_key, 0xAB) == expected <> <<0, 0xAB>>
+  end
+
+  test "ack_payload hashes up to the first NUL and exposes the tail attempt byte" do
+    msg = %{timestamp: 7, txt_type: 0, attempt: 3, text: "hi" <> <<0, 5>>}
+
+    expected =
+      binary_part(:crypto.hash(:sha256, <<7::32-little, 0::6, 3::2, "hi">> <> @public_key), 0, 4)
+
+    assert :meshcore_protocol.ack_payload(msg, @public_key, 0) == expected <> <<5, 0>>
+  end
+
+  test "ack_payload of an empty text covers just the prefix" do
+    msg = %{timestamp: 7, txt_type: 0, attempt: 0, text: ""}
+    expected = binary_part(:crypto.hash(:sha256, <<7::32-little, 0>> <> @public_key), 0, 4)
+    assert :meshcore_protocol.ack_payload(msg, @public_key, 0xFF) == expected <> <<0, 0xFF>>
+  end
+
+  test "an ACK packet serializes to the raw ack bytes and round-trips" do
+    ack = %{
+      route: :flood,
+      type: :ack,
+      version: 0,
+      hash_size: 1,
+      path: <<>>,
+      ack: <<1, 2, 3, 4, 5, 6>>
+    }
+
+    wire = :meshcore_protocol.serialize(ack)
+    assert wire == <<0x0D, 0x00, 1, 2, 3, 4, 5, 6>>
+
+    {:ok, back} = :meshcore_protocol.parse(wire)
+    assert back.type == :ack
+    assert back.route == :flood
+    assert back.ack == <<1, 2, 3, 4, 5, 6>>
+    assert :meshcore_protocol.packet_hash(back) == :meshcore_protocol.packet_hash(ack)
+  end
+
+  test "a PATH return seals the echoed route and bundled ack under the shared secret" do
+    {:ok, secret} = pki_secret()
+    ack = <<1, 2, 3, 4, 5, 6>>
+
+    sealed =
+      :meshcore_protocol.encrypt_shared(secret, %{
+        route: :flood,
+        type: :path,
+        version: 0,
+        hash_size: 1,
+        path: <<>>,
+        dest_hash: 0x5E,
+        src_hash: 0xF2,
+        return_path: <<0xAA, 0xBB>>,
+        extra_type: :ack,
+        extra: ack
+      })
+
+    refute Map.has_key?(sealed, :return_path)
+    refute Map.has_key?(sealed, :return_hash_size)
+    refute Map.has_key?(sealed, :extra_type)
+    refute Map.has_key?(sealed, :extra)
+
+    wire = :meshcore_protocol.serialize(sealed)
+    assert <<0x21, 0x00, 0x5E, 0xF2, mac::2-bytes, ct::binary>> = wire
+    assert <<^mac::2-bytes, _::binary>> = :crypto.mac(:hmac, :sha256, secret, ct)
+
+    <<aes_key::16-bytes, _::binary>> = secret
+    plain = :crypto.crypto_one_time(:aes_128_ecb, aes_key, ct, false)
+    assert plain == <<0x02, 0xAA, 0xBB, 3>> <> ack <> <<0::size(6 * 8)>>
+  end
+
+  test "the PATH return length byte encodes hash size and hop count" do
+    {:ok, secret} = pki_secret()
+
+    inner = fn extra_fields ->
+      sealed =
+        :meshcore_protocol.encrypt_shared(
+          secret,
+          Map.merge(%{type: :path, extra_type: :ack, extra: <<9>>}, extra_fields)
+        )
+
+      <<aes_key::16-bytes, _::binary>> = secret
+      :crypto.crypto_one_time(:aes_128_ecb, aes_key, sealed.ciphertext, false)
+    end
+
+    assert <<0x00, 3, 9, _::binary>> = inner.(%{return_path: <<>>})
+
+    assert <<0x41, 0xAA, 0xBB, 3, 9, _::binary>> =
+             inner.(%{return_path: <<0xAA, 0xBB>>, return_hash_size: 2})
+  end
+
   defp pki_secret do
     {bob_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
     {_, alice_priv} = :crypto.generate_key(:eddsa, :ed25519)

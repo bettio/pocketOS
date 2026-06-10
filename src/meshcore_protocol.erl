@@ -9,6 +9,7 @@
     decrypt_shared/2,
     encrypt_shared/2,
     shared_secret/2,
+    ack_payload/3,
     encrypt/1,
     encrypt/2,
     verify_advert/1,
@@ -120,6 +121,8 @@ parse_payload(anon_req, Payload, Base) ->
         _ ->
             Base#{payload => Payload}
     end;
+parse_payload(ack, Payload, Base) ->
+    Base#{ack => Payload};
 parse_payload(_Type, Payload, Base) ->
     Base#{payload => Payload}.
 
@@ -237,6 +240,8 @@ serialize_payload(anon_req, #{
     dest_hash := Dest, sender_pubkey := Sender, cipher_mac := Mac, ciphertext := CT
 }) ->
     <<Dest, Sender/binary, Mac/binary, CT/binary>>;
+serialize_payload(ack, #{ack := Ack}) ->
+    Ack;
 serialize_payload(_Type, #{payload := Payload}) ->
     Payload.
 
@@ -338,8 +343,9 @@ parse_shared_inner(_Plain, _Packet) ->
     {error, short_plaintext}.
 
 %% Encrypt a PKI packet with a 32-byte shared secret -- inverse of
-%% decrypt_shared/2. A txt_msg seals the text-message inner fields;
-%% request-style packets seal timestamp + req_data.
+%% decrypt_shared/2. A txt_msg seals the text-message inner fields; a path
+%% packet seals the returned route plus its bundled extra; request-style
+%% packets seal timestamp + req_data.
 -spec encrypt_shared(binary(), packet()) -> packet().
 encrypt_shared(Secret, #{type := txt_msg, text := Text} = Packet) when byte_size(Secret) =:= 32 ->
     Timestamp = maps:get(timestamp, Packet, 0),
@@ -347,6 +353,14 @@ encrypt_shared(Secret, #{type := txt_msg, text := Text} = Packet) when byte_size
     Attempt = maps:get(attempt, Packet, 0),
     Inner = <<Timestamp:32/little-unsigned, TxtType:6, Attempt:2, Text/binary>>,
     seal_shared(Secret, Inner, maps:remove(text, Packet));
+encrypt_shared(
+    Secret, #{type := path, return_path := Path, extra_type := ExtraType, extra := Extra} = Packet
+) when byte_size(Secret) =:= 32 ->
+    HashSize = maps:get(return_hash_size, Packet, 1),
+    Inner =
+        <<(HashSize - 1):2, (byte_size(Path) div HashSize):6, Path/binary,
+            (type_to_int(ExtraType)), Extra/binary>>,
+    seal_shared(Secret, Inner, without_path_return(Packet));
 encrypt_shared(Secret, #{req_data := ReqData} = Packet) when byte_size(Secret) =:= 32 ->
     Timestamp = maps:get(timestamp, Packet, 0),
     Inner = <<Timestamp:32/little-unsigned, ReqData/binary>>,
@@ -357,6 +371,33 @@ seal_shared(Secret, Inner, Packet) ->
     CT = aes_ecb(AesKey, pad_to_block(Inner, 16), true),
     <<Mac:2/binary, _/binary>> = crypto:mac(hmac, sha256, Secret, CT),
     Packet#{cipher_mac => Mac, ciphertext => CT}.
+
+without_path_return(Packet) ->
+    P1 = maps:remove(return_path, maps:remove(return_hash_size, Packet)),
+    maps:remove(extra_type, maps:remove(extra, P1)).
+
+%% 6-byte acknowledgement body for a decrypted plain text message: a truncated
+%% hash over the message prefix and the sender key, the extended-attempt byte,
+%% and a caller-supplied random byte. Receivers match the first 4 bytes only.
+-spec ack_payload(packet(), binary(), byte()) -> binary().
+ack_payload(
+    #{timestamp := Ts, txt_type := TxtType, attempt := Attempt, text := Text}, SenderPub, RandByte
+) ->
+    Len = text_len(Text),
+    <<Visible:Len/binary, Tail/binary>> = Text,
+    Prefix = <<Ts:32/little-unsigned, TxtType:6, Attempt:2, Visible/binary>>,
+    <<Hash:4/binary, _/binary>> = crypto:hash(sha256, <<Prefix/binary, SenderPub/binary>>),
+    <<Hash/binary, (attempt_byte(Tail)), RandByte>>.
+
+text_len(Bin) -> text_len(Bin, 0).
+
+text_len(<<0, _/binary>>, Len) -> Len;
+text_len(<<_, Rest/binary>>, Len) -> text_len(Rest, Len + 1);
+text_len(<<>>, Len) -> Len.
+
+%% The byte after the text's NUL carries the attempt number past the 2-bit field.
+attempt_byte(<<0, Byte, _/binary>>) -> Byte;
+attempt_byte(_Tail) -> 0.
 
 %% === encrypt ===
 
