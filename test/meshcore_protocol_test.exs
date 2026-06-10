@@ -369,6 +369,64 @@ defmodule MeshcoreProtocolTest do
              {:error, :bad_mac}
   end
 
+  test "a direct message round-trips through encrypt_shared/decrypt_shared" do
+    {alice_pub, alice_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    {bob_pub, bob_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    {:ok, secret} = :meshcore_protocol.shared_secret(alice_priv, bob_pub)
+    assert {:ok, ^secret} = :meshcore_protocol.shared_secret(bob_priv, alice_pub)
+
+    <<dest_hash, _::binary>> = bob_pub
+    <<src_hash, _::binary>> = alice_pub
+
+    sealed =
+      :meshcore_protocol.encrypt_shared(secret, %{
+        route: :flood,
+        type: :txt_msg,
+        version: 0,
+        hash_size: 1,
+        path: <<>>,
+        dest_hash: dest_hash,
+        src_hash: src_hash,
+        timestamp: 1_700_000_123,
+        attempt: 1,
+        text: "hello test direct"
+      })
+
+    refute Map.has_key?(sealed, :text)
+    assert byte_size(sealed.ciphertext) == 32
+
+    {:ok, pkt} = :meshcore_protocol.parse(:meshcore_protocol.serialize(sealed))
+    {:ok, dec} = :meshcore_protocol.decrypt_shared(secret, pkt)
+    assert dec.text == "hello test direct"
+    assert dec.timestamp == 1_700_000_123
+    assert dec.txt_type == 0
+    assert dec.attempt == 1
+    refute Map.has_key?(dec, :ciphertext)
+  end
+
+  test "decrypt_shared rejects a direct message sealed under another secret" do
+    {:ok, secret} = pki_secret()
+    sealed = :meshcore_protocol.encrypt_shared(secret, %{type: :txt_msg, text: "x"})
+
+    assert :meshcore_protocol.decrypt_shared(:binary.copy(<<1>>, 32), sealed) ==
+             {:error, :bad_mac}
+  end
+
+  test "a request round-trips through encrypt_shared/decrypt_shared" do
+    {:ok, secret} = pki_secret()
+
+    sealed =
+      :meshcore_protocol.encrypt_shared(secret, %{
+        type: :req,
+        timestamp: 42,
+        req_data: <<1, 2, 3>>
+      })
+
+    {:ok, dec} = :meshcore_protocol.decrypt_shared(secret, sealed)
+    assert dec.timestamp == 42
+    assert dec.req_data == <<1, 2, 3>>
+  end
+
   defp pki_secret do
     {bob_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
     {_, alice_priv} = :crypto.generate_key(:eddsa, :ed25519)

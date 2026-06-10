@@ -7,6 +7,7 @@
     decrypt/1,
     decrypt/2,
     decrypt_shared/2,
+    encrypt_shared/2,
     shared_secret/2,
     encrypt/1,
     encrypt/2,
@@ -266,24 +267,25 @@ decrypt(Packet) ->
 decrypt(#{cipher_mac := Mac, ciphertext := CT} = Packet, Key) ->
     <<CalcMac:2/binary, _/binary>> = crypto:mac(hmac, sha256, Key, CT),
     case CalcMac =:= Mac of
-        false ->
-            {error, bad_mac};
-        true ->
-            case aes_ecb(Key, CT, false) of
-                <<Timestamp:32/little-unsigned, TxtType:6, Attempt:2, Text/binary>> ->
-                    Decrypted = Packet#{
-                        timestamp => Timestamp,
-                        txt_type => TxtType,
-                        attempt => Attempt,
-                        text => strip_trailing_nuls(Text)
-                    },
-                    {ok, maps:remove(cipher_mac, maps:remove(ciphertext, Decrypted))};
-                _ ->
-                    {error, short_plaintext}
-            end
+        false -> {error, bad_mac};
+        true -> parse_msg_inner(aes_ecb(Key, CT, false), Packet)
     end;
 decrypt(_Packet, _Key) ->
     {error, no_ciphertext}.
+
+parse_msg_inner(<<Timestamp:32/little-unsigned, TxtType:6, Attempt:2, Text/binary>>, Packet) ->
+    {ok,
+        without_cipher(Packet#{
+            timestamp => Timestamp,
+            txt_type => TxtType,
+            attempt => Attempt,
+            text => strip_trailing_nuls(Text)
+        })};
+parse_msg_inner(_Plain, _Packet) ->
+    {error, short_plaintext}.
+
+without_cipher(Packet) ->
+    maps:remove(cipher_mac, maps:remove(ciphertext, Packet)).
 
 strip_trailing_nuls(Bin) ->
     Len = last_nonzero(Bin, 0, 0),
@@ -310,7 +312,8 @@ shared_secret(OurSeed, PeerEdPub) ->
     end.
 
 %% Decrypt a PKI message with a 32-byte shared secret (HMAC on the full
-%% secret, AES key = its first 16 bytes); yields timestamp + req_data.
+%% secret, AES key = its first 16 bytes). A txt_msg yields the text-message
+%% inner fields; request-style payloads yield timestamp + req_data.
 -spec decrypt_shared(binary(), packet()) -> {ok, packet()} | {error, atom()}.
 decrypt_shared(Secret, #{cipher_mac := Mac, ciphertext := CT} = Packet) when
     byte_size(Secret) =:= 32
@@ -321,18 +324,39 @@ decrypt_shared(Secret, #{cipher_mac := Mac, ciphertext := CT} = Packet) when
             {error, bad_mac};
         true ->
             <<AesKey:16/binary, _/binary>> = Secret,
-            case aes_ecb(AesKey, CT, false) of
-                <<Timestamp:32/little-unsigned, ReqData/binary>> ->
-                    Decrypted = Packet#{
-                        timestamp => Timestamp, req_data => strip_trailing_nuls(ReqData)
-                    },
-                    {ok, maps:remove(cipher_mac, maps:remove(ciphertext, Decrypted))};
-                _ ->
-                    {error, short_plaintext}
-            end
+            parse_shared_inner(aes_ecb(AesKey, CT, false), Packet)
     end;
 decrypt_shared(_Secret, _Packet) ->
     {error, no_ciphertext}.
+
+parse_shared_inner(Plain, #{type := txt_msg} = Packet) ->
+    parse_msg_inner(Plain, Packet);
+parse_shared_inner(<<Timestamp:32/little-unsigned, ReqData/binary>>, Packet) ->
+    {ok,
+        without_cipher(Packet#{timestamp => Timestamp, req_data => strip_trailing_nuls(ReqData)})};
+parse_shared_inner(_Plain, _Packet) ->
+    {error, short_plaintext}.
+
+%% Encrypt a PKI packet with a 32-byte shared secret -- inverse of
+%% decrypt_shared/2. A txt_msg seals the text-message inner fields;
+%% request-style packets seal timestamp + req_data.
+-spec encrypt_shared(binary(), packet()) -> packet().
+encrypt_shared(Secret, #{type := txt_msg, text := Text} = Packet) when byte_size(Secret) =:= 32 ->
+    Timestamp = maps:get(timestamp, Packet, 0),
+    TxtType = maps:get(txt_type, Packet, 0),
+    Attempt = maps:get(attempt, Packet, 0),
+    Inner = <<Timestamp:32/little-unsigned, TxtType:6, Attempt:2, Text/binary>>,
+    seal_shared(Secret, Inner, maps:remove(text, Packet));
+encrypt_shared(Secret, #{req_data := ReqData} = Packet) when byte_size(Secret) =:= 32 ->
+    Timestamp = maps:get(timestamp, Packet, 0),
+    Inner = <<Timestamp:32/little-unsigned, ReqData/binary>>,
+    seal_shared(Secret, Inner, maps:remove(req_data, Packet)).
+
+seal_shared(Secret, Inner, Packet) ->
+    <<AesKey:16/binary, _/binary>> = Secret,
+    CT = aes_ecb(AesKey, pad_to_block(Inner, 16), true),
+    <<Mac:2/binary, _/binary>> = crypto:mac(hmac, sha256, Secret, CT),
+    Packet#{cipher_mac => Mac, ciphertext => CT}.
 
 %% === encrypt ===
 
