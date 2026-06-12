@@ -29,13 +29,16 @@
 %% Parse a raw MeshCore frame into a map: header, optional transport codes, path,
 %% and the typed payload for known types (unknown types keep a raw `payload').
 -spec parse(binary()) -> {ok, packet()} | {error, atom()}.
-parse(<<Version:2, TypeInt:4, RouteInt:2, Rest/binary>>) ->
-    parse_frame(int_to_route(RouteInt), int_to_type(TypeInt), Version, Rest);
+%% Only version 0 (PAYLOAD_VER_1) exists on-air; reject anything else.
+parse(<<0:2, TypeInt:4, RouteInt:2, Rest/binary>>) ->
+    parse_frame(int_to_route(RouteInt), int_to_type(TypeInt), 0, Rest);
 parse(_Invalid) ->
     {error, failed_meshcore_parse}.
 
 parse_frame(Route, Type, Version, Rest0) ->
     case take_transport_codes(Route, Rest0) of
+        {ok, _TransportCodes, <<3:2, _:6, _/binary>>} ->
+            {error, failed_meshcore_parse};
         {ok, TransportCodes, <<HashSizeCode:2, HopCount:6, Rest1/binary>>} ->
             HashSize = HashSizeCode + 1,
             PathLen = HopCount * HashSize,

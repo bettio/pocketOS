@@ -88,6 +88,19 @@ defmodule MeshcoreProtocolTest do
     assert :meshcore_protocol.parse(<<>>) == {:error, :failed_meshcore_parse}
   end
 
+  test "a non-zero version frame is rejected (meshtastic broadcast, on-air capture)" do
+    meshtastic_text =
+      <<255, 255, 255, 255, 132, 70, 49, 67, 225, 19, 88, 159, 99, 31, 0, 132, 44, 85, 219, 122,
+        143, 81, 66, 98, 85, 230>>
+
+    assert :meshcore_protocol.parse(meshtastic_text) == {:error, :failed_meshcore_parse}
+  end
+
+  test "a reserved path hash size (0b11) is rejected" do
+    # header version 0 / advert / flood, path_len byte 0b11_000000
+    assert :meshcore_protocol.parse(<<0x11, 0xC0>>) == {:error, :failed_meshcore_parse}
+  end
+
   test "packet_hash ignores route and path but tracks the payload" do
     <<_header, _path_len, payload::binary>> = @f8
     {:ok, flood} = :meshcore_protocol.parse(@f8)
