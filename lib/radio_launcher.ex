@@ -24,6 +24,7 @@ defmodule RadioLauncher do
 
     {:ok, periph_config} = HAL.get_peripheral_config("radio")
     complete_config = Map.merge(meshtastic_medium_fast_config, periph_config)
+    default_channel_name = "MediumFast"
 
     {public_key, private_key} = NodeKey.load_or_generate("FS0:/nodekey.bin")
 
@@ -55,7 +56,7 @@ defmodule RadioLauncher do
 
     channel =
       case Map.get(meshtcfg, :channel_name) do
-        nil -> :meshtastic.default_long_fast_channel()
+        nil -> :meshtastic.default_channel(default_channel_name)
         name -> %{name: name, psk: :meshtastic.default_long_fast_psk()}
       end
 

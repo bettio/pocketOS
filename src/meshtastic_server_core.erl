@@ -182,7 +182,7 @@ init(MeshtasticOpts, InitialRolling) ->
     {Core, [{set_timer, ?INITIAL_PERIODIC_MS, periodic}]}.
 
 init_channel(undefined) ->
-    meshtastic:default_long_fast_channel();
+    meshtastic:default_channel(<<"LongFast">>);
 init_channel(#{name := Name, psk := Psk} = Channel) ->
     Channel#{hash => meshtastic:channel_hash(Name, Psk)}.
 

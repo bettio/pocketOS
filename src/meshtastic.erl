@@ -11,7 +11,7 @@
     channel_hash/2,
     relay_node_byte/1,
     default_long_fast_psk/0,
-    default_long_fast_channel/0
+    default_channel/1
 ]).
 
 parse(Payload) ->
@@ -77,8 +77,8 @@ default_long_fast_psk() ->
     <<16#d4, 16#f1, 16#bb, 16#3a, 16#20, 16#29, 16#07, 16#59, 16#f0, 16#bc, 16#ff, 16#ab, 16#cf,
         16#4e, 16#69, 16#01>>.
 
-default_long_fast_channel() ->
-    Name = <<"LongFast">>,
+%% A preset's default channel: named after the preset, default PSK.
+default_channel(Name) ->
     Psk = default_long_fast_psk(),
     #{name => Name, psk => Psk, hash => channel_hash(Name, Psk)}.
 

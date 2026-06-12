@@ -380,7 +380,7 @@ defmodule MeshtasticServerTest do
         node_info: %{user_info: our_user_info}
       )
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     req_data =
       %{
@@ -473,7 +473,7 @@ defmodule MeshtasticServerTest do
         node_info: %{user_info: our_user_info}
       )
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     # a broadcast NodeInfo want_response is BOTH a recipient (reply) AND floodable
     req_data =
@@ -532,7 +532,7 @@ defmodule MeshtasticServerTest do
         node_info: %{user_info: %{id: "!deadcafe", long_name: "pocketOS test", short_name: "dc"}}
       )
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     req_data =
       %{portnum: :TEXT_MESSAGE_APP, payload: "ping", want_response: true}
@@ -594,7 +594,7 @@ defmodule MeshtasticServerTest do
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     # A broadcast we should forward (flood). relay_node gets overwritten with
     # ours; next_hop stays 0.
@@ -655,7 +655,7 @@ defmodule MeshtasticServerTest do
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     # A DM for someone else that names us as the next hop.
     wire =
@@ -714,7 +714,7 @@ defmodule MeshtasticServerTest do
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     # A directed DM whose next_hop names a different node (0x77, not our 0xFE).
     wire =
@@ -814,7 +814,7 @@ defmodule MeshtasticServerTest do
     assert p.dest == peer
     assert p.want_ack == true
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     ack_data =
       %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: p.packet_id}
@@ -941,7 +941,7 @@ defmodule MeshtasticServerTest do
         node_id: us
       )
 
-    %{hash: channel_hash} = :meshtastic.default_long_fast_channel()
+    %{hash: channel_hash} = :meshtastic.default_channel("LongFast")
 
     ack_data =
       %{portnum: :ROUTING_APP, payload: %{error_reason: :NONE}, request_id: 0x12345678}

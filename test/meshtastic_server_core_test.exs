@@ -22,7 +22,7 @@ defmodule MeshtasticServerCoreTest do
   defp psk, do: :meshtastic.default_long_fast_psk()
 
   defp channel_hash do
-    %{hash: h} = :meshtastic.default_long_fast_channel()
+    %{hash: h} = :meshtastic.default_channel("LongFast")
     h
   end
 
