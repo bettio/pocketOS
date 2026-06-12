@@ -111,12 +111,42 @@ defmodule MeshtasticCallbacks do
 
   defp pre_process(%{src: src, rssi: rssi, snr: snr})
        when is_integer(rssi) and is_integer(snr) do
+    maybe_learn_node(src)
+
     :micronesia.dirty_write(
       {:meshtastic_signal, src, %{rssi: rssi, snr: snr, last_heard: :erlang.system_time(:second)}}
     )
   end
 
+  defp pre_process(%{src: src}) when is_integer(src) do
+    maybe_learn_node(src)
+  end
+
   defp pre_process(_), do: :ok
+
+  defp maybe_learn_node(src) do
+    case :micronesia.dirty_read({:meshtastic_node_info, src}) do
+      [] ->
+        hex = lpad(Integer.to_string(src, 16), 8)
+        <<_::binary-4, last4::binary-4>> = hex
+
+        :micronesia.dirty_write(
+          {:meshtastic_node_info, src,
+           %{
+             id: "!#{hex}",
+             short_name: last4,
+             long_name: "Meshtastic #{last4}",
+             updated_at: :erlang.system_time(:second)
+           }}
+        )
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp lpad(s, n) when byte_size(s) >= n, do: s
+  defp lpad(s, n), do: lpad("0" <> s, n)
 
   def peer_public_key(node_id) do
     case :micronesia.dirty_read({:meshtastic_node_info, node_id}) do
