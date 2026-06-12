@@ -107,6 +107,7 @@
 %% top 22 bits = fresh random per packet.
 -define(PACKET_ID_COUNTER_MASK, 16#3FF).
 -define(BROADCAST_ADDR, 16#FFFFFFFF).
+-define(OK_TO_MQTT_BITFIELD, 1).
 -define(DEFAULT_NODE_ID, 1127302788).
 -define(INITIAL_PERIODIC_MS, 500).
 -define(PERIODIC_MS, 60000).
@@ -351,7 +352,8 @@ traceroute_reply(
     Data = #{
         portnum => 'TRACEROUTE_APP',
         payload => Route1,
-        request_id => OrigPid
+        request_id => OrigPid,
+        bitfield => ?OK_TO_MQTT_BITFIELD
     },
     Bin = erlang:iolist_to_binary(meshtastic_proto:encode(Data)),
     ?MESH_TRACE("[mesh] traceroute reply -> src=~p req=~p snr=~p~n", [Src, OrigPid, SnrByte]),
@@ -450,7 +452,8 @@ ack_data(RequestId) ->
     AckData = #{
         portnum => 'ROUTING_APP',
         payload => #{error_reason => 'NONE'},
-        request_id => RequestId
+        request_id => RequestId,
+        bitfield => ?OK_TO_MQTT_BITFIELD
     },
     erlang:iolist_to_binary(meshtastic_proto:encode(AckData)).
 
@@ -716,7 +719,10 @@ handle_periodic(_Env, Core) ->
     {Core, []}.
 
 send_node_info(Dest, Extra, Env, #core{node_info = #{user_info := UserInfo}} = Core) ->
-    Data = maps:merge(#{portnum => 'NODEINFO_APP', payload => UserInfo}, Extra),
+    Data = maps:merge(
+        #{portnum => 'NODEINFO_APP', payload => UserInfo, bitfield => ?OK_TO_MQTT_BITFIELD},
+        Extra
+    ),
     Bin = erlang:iolist_to_binary(meshtastic_proto:encode(Data)),
     originate(Dest, Bin, Env, Core);
 send_node_info(_Dest, _Extra, _Env, Core) ->

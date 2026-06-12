@@ -1,6 +1,8 @@
 defmodule MeshtasticCallbacks do
   require MeshTrace
 
+  @ok_to_mqtt_bitfield 1
+
   def init() do
     :micronesia.start()
     :micronesia.create_table(:meshtastic_message)
@@ -140,7 +142,7 @@ defmodule MeshtasticCallbacks do
     MeshTrace.trace("[mesh] send_text_message: #{inspect(text)}")
 
     data =
-      %{portnum: :TEXT_MESSAGE_APP, payload: text}
+      %{portnum: :TEXT_MESSAGE_APP, payload: text, bitfield: @ok_to_mqtt_bitfield}
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
@@ -153,7 +155,7 @@ defmodule MeshtasticCallbacks do
     MeshTrace.trace("[mesh] send_direct_message: dest=#{dest_node_id} #{inspect(text)}")
 
     data =
-      %{portnum: :TEXT_MESSAGE_APP, payload: text}
+      %{portnum: :TEXT_MESSAGE_APP, payload: text, bitfield: @ok_to_mqtt_bitfield}
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
@@ -166,7 +168,7 @@ defmodule MeshtasticCallbacks do
     MeshTrace.trace("[mesh] send_text_message_async: #{inspect(text)}")
 
     data =
-      %{portnum: :TEXT_MESSAGE_APP, payload: text}
+      %{portnum: :TEXT_MESSAGE_APP, payload: text, bitfield: @ok_to_mqtt_bitfield}
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
@@ -179,7 +181,7 @@ defmodule MeshtasticCallbacks do
     MeshTrace.trace("[mesh] send_direct_message_async: dest=#{dest_node_id} #{inspect(text)}")
 
     data =
-      %{portnum: :TEXT_MESSAGE_APP, payload: text}
+      %{portnum: :TEXT_MESSAGE_APP, payload: text, bitfield: @ok_to_mqtt_bitfield}
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
@@ -192,7 +194,12 @@ defmodule MeshtasticCallbacks do
     MeshTrace.trace("[mesh] send_traceroute: dest=#{dest_node_id}")
 
     data =
-      %{portnum: :TRACEROUTE_APP, payload: %{}, want_response: true}
+      %{
+        portnum: :TRACEROUTE_APP,
+        payload: %{},
+        want_response: true,
+        bitfield: @ok_to_mqtt_bitfield
+      }
       |> :meshtastic_proto.encode()
       |> :erlang.iolist_to_binary()
 
@@ -212,7 +219,8 @@ defmodule MeshtasticCallbacks do
         latitude_i: round(lat * 10_000_000),
         longitude_i: round(lon * 10_000_000),
         altitude: round(alt)
-      }
+      },
+      bitfield: @ok_to_mqtt_bitfield
     }
 
     data =
