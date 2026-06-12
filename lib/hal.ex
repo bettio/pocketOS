@@ -17,8 +17,9 @@ defmodule HAL do
   def init("linux") do
     with {:ok, _} <- FSRegistry.start_link(),
          {:ok, fs0} <- StackedFS.start_link("./data/"),
-         :ok <- FSRegistry.register_fs("FS0", fs0) do
-      IO.puts("Registered fs: ./data as FS0")
+         :ok <- FSRegistry.register_fs("FS0", fs0),
+         :ok <- FSRegistry.register_fs("NVS0", fs0) do
+      IO.puts("Registered fs: ./data as FS0 and NVS0")
     end
 
     open_sdl_display()
@@ -52,11 +53,12 @@ defmodule HAL do
 
     ili = open_ili9342c_display("t-deck")
 
+    register_nvs_fs()
+
     IO.puts("Mounting SD")
 
     with spi_host when spi_host != :undefined <- :erlang.whereis(:main_spi),
          {:ok, _ref} <- :esp.mount("sdspi", "/sdcard", :fat, spi_host: spi_host, cs: 39),
-         {:ok, _} <- FSRegistry.start_link(),
          {:ok, fs0} <- StackedFS.start_link("/sdcard/"),
          :ok <- FSRegistry.register_fs("FS0", fs0) do
       IO.puts("Mounted SD")
@@ -86,6 +88,8 @@ defmodule HAL do
 
     ili = open_ili9342c_display("t-pager")
 
+    register_nvs_fs()
+
     # IO.puts("Mounting SD")
     #
     #    with spi_host when spi_host != :undefined <- :erlang.whereis(:main_spi),
@@ -113,6 +117,13 @@ defmodule HAL do
     :xl9555_driver.set_level(expio, 4, :high)
 
     ili
+  end
+
+  defp register_nvs_fs() do
+    {:ok, _} = FSRegistry.start_link()
+    {:ok, nvs0} = NVSFS.start_link(namespace: :pocketos)
+    :ok = FSRegistry.register_fs("NVS0", nvs0)
+    IO.puts("Registered fs: NVS namespace pocketos as NVS0")
   end
 
   defp open_sdl_display do

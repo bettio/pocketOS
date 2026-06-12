@@ -26,7 +26,7 @@ defmodule RadioLauncher do
     complete_config = Map.merge(meshtastic_medium_fast_config, periph_config)
     default_channel_name = "MediumFast"
 
-    {public_key, private_key} = NodeKey.load_or_generate("FS0:/nodekey.bin")
+    {public_key, private_key} = NodeKey.load_or_generate("NVS0:/nodekey.bin")
 
     id_256 = :crypto.hash(:sha256, public_key)
     <<node_id::little-unsigned-integer-32, _discard::binary>> = id_256
