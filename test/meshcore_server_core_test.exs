@@ -154,16 +154,51 @@ defmodule MeshcoreServerCoreTest do
     assert delivered.snr == 6
   end
 
-  test "rx flags an undecryptable group text and keeps the ciphertext" do
+  test "rx leaves a wrong-channel group text unconsumed" do
     {:ok, pkt} = :meshcore_protocol.parse(@grp_txt)
+    core = core(channel_key: <<0::128>>)
 
-    {:ok, _core, effects} =
-      :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core(channel_key: <<0::128>>))
+    assert {:next, core1, []} = :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core)
+    # not remembered as seen: a retransmission must fall through too
+    assert {:next, _core2, []} = :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core1)
+  end
 
-    assert [{:deliver, delivered}] = effects
-    assert delivered.decrypt_error == :bad_mac
-    assert Map.has_key?(delivered, :ciphertext)
-    refute Map.has_key?(delivered, :text)
+  test "rx leaves an aliased meshtastic unicast unconsumed (on-air capture)" do
+    # meshtastic packet to node 0x2B310D17: first byte 0x17 parses as a
+    # version-0 grp_txt/transport_direct meshcore header
+    wire =
+      <<23, 13, 49, 43, 132, 70, 49, 67, 100, 114, 97, 70, 66, 31, 0, 132, 3, 146, 181, 236, 212,
+        146, 20, 175, 224, 235, 99, 101, 34, 24, 53, 70, 219, 163, 15, 182, 220, 232, 252, 26,
+        229, 0, 16, 59, 91, 157, 148, 141, 31, 71, 136, 237, 246, 222, 153, 151, 143, 238, 205,
+        80, 31, 204, 79, 25, 41, 0, 16, 13, 88, 24, 47, 244, 160, 56, 165, 23, 238, 81, 220, 66,
+        70, 34, 140, 88, 141, 137, 19, 53, 164, 173, 107, 168, 25, 133, 162, 166, 9, 9, 134>>
+
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    assert {:next, _core, []} = :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core())
+  end
+
+  test "rx leaves an advert with a broken signature unconsumed" do
+    <<head::binary-40, sig_byte, rest::binary>> = @advert
+
+    {:ok, pkt} =
+      :meshcore_protocol.parse(<<head::binary, Bitwise.bxor(sig_byte, 1), rest::binary>>)
+
+    assert {:next, _core, []} = :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core())
+  end
+
+  test "rx consumes a 6-byte ack but leaves other ack sizes unconsumed" do
+    {:ok, ack} = :meshcore_protocol.parse(<<0x0D, 0x00, 1, 2, 3, 4, 5, 6>>)
+
+    assert {:ok, _core, [{:deliver, _}]} =
+             :meshcore_server_core.handle_rx(ack, @attrs, %{}, core())
+
+    {:ok, short} = :meshcore_protocol.parse(<<0x0D, 0x00, 1, 2, 3>>)
+    assert {:next, _core, []} = :meshcore_server_core.handle_rx(short, @attrs, %{}, core())
+  end
+
+  test "rx leaves unhandled frame types (raw_custom) unconsumed" do
+    {:ok, pkt} = :meshcore_protocol.parse(<<0x3D, 0x00, 1, 2, 3>>)
+    assert {:next, _core, []} = :meshcore_server_core.handle_rx(pkt, @attrs, %{}, core())
   end
 
   test "enrich passes non-decodable frame types through unchanged" do
@@ -329,21 +364,18 @@ defmodule MeshcoreServerCoreTest do
     assert drain(core1) == []
   end
 
-  test "rx passes through an anon_req not addressed to us" do
+  test "rx leaves an anon_req not addressed to us unconsumed" do
     opts = identity_opts()
     our_pub = Keyword.fetch!(opts, :public_key)
     {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
     <<0x1E, 0x00, dest, rest::binary>> = anon_req_frame(our_pub, sender_pub, sender_priv, 1, "x")
     {:ok, pkt} = :meshcore_protocol.parse(<<0x1E, 0x00, rem(dest + 1, 256), rest::binary>>)
 
-    {:ok, core1, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
-    assert [{:deliver, delivered}] = effects
-    refute Map.has_key?(delivered, :req_data)
-    refute Map.has_key?(delivered, :decrypt_error)
+    assert {:next, core1, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
     assert drain(core1) == []
   end
 
-  test "rx flags an undecryptable anon_req addressed to us" do
+  test "rx leaves an undecryptable anon_req addressed to us unconsumed" do
     opts = identity_opts()
     our_pub = Keyword.fetch!(opts, :public_key)
     {sender_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
@@ -351,10 +383,7 @@ defmodule MeshcoreServerCoreTest do
     frame = anon_req_frame(our_pub, sender_pub, wrong_priv, 1, "x")
     {:ok, pkt} = :meshcore_protocol.parse(frame)
 
-    {:ok, core1, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
-    assert [{:deliver, delivered}] = effects
-    assert delivered.decrypt_error == :bad_mac
-    refute Map.has_key?(delivered, :req_data)
+    assert {:next, core1, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
     assert drain(core1) == []
   end
 
@@ -385,22 +414,18 @@ defmodule MeshcoreServerCoreTest do
     assert [_ack] = drain(core2)
   end
 
-  test "rx flags a direct message from an unknown sender" do
+  test "rx leaves a direct message from an unknown sender unconsumed" do
     opts = identity_opts()
     our_pub = Keyword.fetch!(opts, :public_key)
     {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
 
     {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, sender_pub, sender_priv, "x", 1))
 
-    {:ok, core2, [{:deliver, delivered}]} =
-      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
-
-    assert delivered.decrypt_error == :no_contact
-    assert Map.has_key?(delivered, :ciphertext)
+    assert {:next, core2, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
     assert drain(core2) == []
   end
 
-  test "rx flags a direct message that decrypts under no known contact" do
+  test "rx leaves a direct message that decrypts under no known contact unconsumed" do
     opts = identity_opts()
     our_pub = Keyword.fetch!(opts, :public_key)
     {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
@@ -411,15 +436,11 @@ defmodule MeshcoreServerCoreTest do
 
     {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, sender_pub, imp_priv, "x", 1))
 
-    {:ok, core2, [{:deliver, delivered}]} =
-      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
-
-    assert delivered.decrypt_error == :bad_mac
-    refute Map.has_key?(delivered, :text)
+    assert {:next, core2, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
     assert drain(core2) == []
   end
 
-  test "rx passes through a direct message not addressed to us" do
+  test "rx leaves a direct message not addressed to us unconsumed" do
     opts = identity_opts()
     our_pub = Keyword.fetch!(opts, :public_key)
     {sender_pub, sender_priv} = :crypto.generate_key(:eddsa, :ed25519)
@@ -427,11 +448,7 @@ defmodule MeshcoreServerCoreTest do
     <<h, pl, dest, rest::binary>> = dm_frame(our_pub, sender_pub, sender_priv, "x", 1)
     {:ok, pkt} = :meshcore_protocol.parse(<<h, pl, rem(dest + 1, 256), rest::binary>>)
 
-    {:ok, core2, [{:deliver, delivered}]} =
-      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
-
-    refute Map.has_key?(delivered, :decrypt_error)
-    refute Map.has_key?(delivered, :text)
+    assert {:next, core2, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
     assert drain(core2) == []
   end
 
@@ -497,11 +514,8 @@ defmodule MeshcoreServerCoreTest do
 
     {:ok, pkt} = :meshcore_protocol.parse(dm_frame(our_pub, first_pub, first_priv, "x", 1))
 
-    {:ok, _c, [{:deliver, delivered}]} =
-      :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), c64)
-
-    assert Map.has_key?(delivered, :decrypt_error)
-    refute Map.has_key?(delivered, :text)
+    # the evicted contact can no longer decrypt for us, so the DM is not ours
+    assert {:next, _c, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), c64)
   end
 
   # ---- direct-message ack ----

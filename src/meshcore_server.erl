@@ -58,10 +58,10 @@ handle_call(
     case meshcore_protocol:parse(Payload) of
         {ok, Packet} ->
             Env = #{mono_ms => erlang:monotonic_time(millisecond), rand22 => rand22()},
-            {ok, Core1, Effects} = meshcore_server_core:handle_rx(Packet, Attributes, Env, Core0),
+            {Verdict, Core1, Effects} = meshcore_server_core:handle_rx(Packet, Attributes, Env, Core0),
             run_effects(Effects, Callbacks),
             State1 = pump_tx(State#state{core = Core1}),
-            {reply, ok, State1};
+            {reply, Verdict, State1};
         _Invalid ->
             {reply, next, State}
     end;

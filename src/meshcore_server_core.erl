@@ -126,9 +126,10 @@ can_advertise(#core{public_key = Pub, private_key = Priv, name = Name}) ->
 
 %% Enrich a parsed inbound frame, learn the contact it may announce, and
 %% deliver it with the radio rssi/snr merged in. Duplicates (same payload
-%% heard again, or our own TX echoed back by a repeater) are dropped. No
-%% forwarding yet.
--spec handle_rx(map(), map(), env(), core_state()) -> {ok, core_state(), [effect()]}.
+%% heard again, or our own TX echoed back by a repeater) are dropped. A
+%% foreign frame (see foreign/2) is left unconsumed (`next`) for the next
+%% radio_manager handler. No forwarding yet.
+-spec handle_rx(map(), map(), env(), core_state()) -> {ok | next, core_state(), [effect()]}.
 handle_rx(Packet, Attributes, Env, #core{seen = Seen} = Core0) ->
     Hash = meshcore_protocol:packet_hash(Packet),
     case seen_member(Hash, Seen) of
@@ -136,16 +137,43 @@ handle_rx(Packet, Attributes, Env, #core{seen = Seen} = Core0) ->
             ?MESH_TRACE("[meshcore] rx dup dropped~n", []),
             {ok, Core0, []};
         false ->
-            handle_rx_new(Packet#{packet_hash => Hash}, Attributes, Env, remember_seen(Hash, Core0))
+            handle_rx_new(Packet#{packet_hash => Hash}, Attributes, Env, Core0)
     end.
 
 handle_rx_new(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) ->
     {Enriched, Core1} = enrich_rx(Packet, ChannelKey, Core0),
-    Core2 = maybe_learn_contact(Enriched, Env, Core1),
-    Delivered = with_attributes(Enriched, Attributes),
-    Core3 = maybe_reply_discover(Packet, Attributes, Env, Core2),
-    Core4 = maybe_ack_dm(Enriched, Env, Core3),
-    {ok, Core4, [{deliver, Delivered}]}.
+    case foreign(Enriched, our_hash(Core0)) of
+        true ->
+            ?MESH_TRACE("[meshcore] rx foreign, passing on~n", []),
+            {next, Core0, []};
+        false ->
+            Core2 = remember_seen(maps:get(packet_hash, Enriched), Core1),
+            Core3 = maybe_learn_contact(Enriched, Env, Core2),
+            Delivered = with_attributes(Enriched, Attributes),
+            Core4 = maybe_reply_discover(Packet, Attributes, Env, Core3),
+            Core5 = maybe_ack_dm(Enriched, Env, Core4),
+            {ok, Core5, [{deliver, Delivered}]}
+    end.
+
+%% Consume only frames that validate as ours (signature, MAC or dest_hash
+%% match); anything else may be another protocol aliasing into our header.
+foreign(#{type := advert, sig_ok := SigOk}, _Us) ->
+    not SigOk;
+foreign(#{type := Type} = Packet, _Us) when Type =:= grp_txt; Type =:= grp_data ->
+    maps:is_key(decrypt_error, Packet);
+foreign(#{type := Type, dest_hash := DestHash} = Packet, Us) when
+    Type =:= txt_msg; Type =:= req; Type =:= response; Type =:= path; Type =:= anon_req
+->
+    DestHash =/= Us orelse maps:is_key(decrypt_error, Packet);
+foreign(#{type := ack, ack := Ack}, _Us) ->
+    byte_size(Ack) =/= 6;
+foreign(#{type := control} = Packet, _Us) ->
+    maps:is_key(payload, Packet);
+foreign(_Packet, _Us) ->
+    true.
+
+our_hash(#core{public_key = <<First, _/binary>>}) -> First;
+our_hash(_Core) -> undefined.
 
 enrich_rx(#{type := anon_req} = Packet, _ChannelKey, Core) ->
     {enrich_anon(Packet, Core), Core};
@@ -160,10 +188,11 @@ with_attributes(Packet, Attributes) ->
         snr => maps:get(snr, Attributes, undefined)
     }.
 
-%% Enrich a parsed frame in place: decrypt group text (ciphertext -> text) or
-%% attach the advert signature check; other types pass through unchanged.
+%% Enrich a parsed frame in place: decrypt group text/data (ciphertext ->
+%% text) or attach the advert signature check; other types pass through
+%% unchanged.
 -spec enrich(map(), binary()) -> map().
-enrich(#{type := grp_txt} = Packet, Key) ->
+enrich(#{type := Type} = Packet, Key) when Type =:= grp_txt; Type =:= grp_data ->
     case meshcore_protocol:decrypt(Packet, Key) of
         {ok, Decrypted} -> Decrypted;
         {error, Reason} -> Packet#{decrypt_error => Reason}
