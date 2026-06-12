@@ -709,7 +709,7 @@ can_send_pki(#core{private_key = Priv}) -> Priv =/= undefined.
 -spec handle_periodic(env(), core_state()) -> {core_state(), [effect()]}.
 handle_periodic(Env, #core{node_info = #{user_info := _UserInfo}} = Core) ->
     ?MESH_TRACE("[mesh] periodic node_info broadcast~n", []),
-    Core1 = send_node_info(?BROADCAST_ADDR, #{}, Env, Core),
+    Core1 = send_node_info(?BROADCAST_ADDR, #{want_response => true}, Env, Core),
     {Core1, [{set_timer, ?PERIODIC_MS, periodic}]};
 handle_periodic(_Env, Core) ->
     ?MESH_TRACE("[mesh] periodic skip (no user_info)~n", []),
