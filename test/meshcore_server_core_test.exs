@@ -621,6 +621,35 @@ defmodule MeshcoreServerCoreTest do
     assert {:next, _c, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), c64)
   end
 
+  # ---- handle_rx: path-return decrypt ----
+
+  test "rx decrypts a path-return addressed to us and surfaces the bundled ack" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+    ack = <<1, 2, 3, 4, 5, 6>>
+
+    wire = path_return_frame(our_pub, sender_pub, sender_priv, <<>>, ack)
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    {:ok, _core2, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [{:deliver, delivered}] = effects
+    assert delivered.type == :path
+    assert delivered.extra_type == :ack
+    assert binary_part(delivered.extra, 0, 6) == ack
+    assert delivered.return_path == <<>>
+    assert delivered.sender_pubkey == sender_pub
+    refute Map.has_key?(delivered, :ciphertext)
+  end
+
+  test "rx leaves a path-return addressed to another node unconsumed" do
+    {core1, our_pub, sender_pub, sender_priv} = core_with_contact()
+    <<our_first, _::binary>> = our_pub
+    {other_pub, _} = keypair_with_first(rem(our_first + 1, 256))
+
+    wire = path_return_frame(other_pub, sender_pub, sender_priv, <<>>, <<1, 2, 3, 4, 5, 6>>)
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    assert {:next, _core2, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+  end
+
   # ---- direct-message ack ----
 
   test "rx acks a flood direct message with a path return" do
@@ -785,6 +814,27 @@ defmodule MeshcoreServerCoreTest do
           extra
         )
       )
+    )
+  end
+
+  defp path_return_frame(recipient_pub, src_pub, seal_priv, return_path, ack) do
+    {:ok, secret} = :meshcore_protocol.shared_secret(seal_priv, recipient_pub)
+    <<dest_hash, _::binary>> = recipient_pub
+    <<src_hash, _::binary>> = src_pub
+
+    :meshcore_protocol.serialize(
+      :meshcore_protocol.encrypt_shared(secret, %{
+        route: :flood,
+        type: :path,
+        version: 0,
+        hash_size: 1,
+        path: <<>>,
+        dest_hash: dest_hash,
+        src_hash: src_hash,
+        return_path: return_path,
+        extra_type: :ack,
+        extra: ack
+      })
     )
   end
 

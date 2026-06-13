@@ -179,8 +179,8 @@ our_hash(_Core) -> undefined.
 
 enrich_rx(#{type := anon_req} = Packet, _ChannelKey, Core) ->
     {enrich_anon(Packet, Core), Core};
-enrich_rx(#{type := txt_msg} = Packet, _ChannelKey, Core) ->
-    enrich_dm(Packet, Core);
+enrich_rx(#{type := Type} = Packet, _ChannelKey, Core) when Type =:= txt_msg; Type =:= path ->
+    enrich_to_us(Packet, Core);
 enrich_rx(Packet, ChannelKey, Core) ->
     {enrich(Packet, ChannelKey), Core}.
 
@@ -220,33 +220,38 @@ enrich_anon(
 enrich_anon(Packet, _Core) ->
     Packet.
 
-enrich_dm(
+%% Decrypt a frame addressed to our key byte -- a direct message or a path-return
+%% ack carrier -- by resolving the sender from contacts via src_hash. Attaches
+%% sender_pubkey/sender_name; the decrypted inner fields depend on the type.
+enrich_to_us(
     #{dest_hash := DestHash, src_hash := SrcHash} = Packet,
     #core{public_key = <<OurFirst, _/binary>>, private_key = Priv, contacts = Contacts} = Core
 ) when is_binary(Priv), DestHash =:= OurFirst ->
     case contact_candidates(SrcHash, Contacts) of
         [] ->
-            ?MESH_TRACE("[meshcore] dm from unknown contact src=~p~n", [SrcHash]),
+            ?MESH_TRACE("[meshcore] ~p from unknown contact src=~p~n", [
+                maps:get(type, Packet), SrcHash
+            ]),
             {Packet#{decrypt_error => no_contact}, Core};
         Candidates ->
-            try_dm(Candidates, Packet, Core)
+            try_to_us(Candidates, Packet, Core)
     end;
-enrich_dm(Packet, Core) ->
+enrich_to_us(Packet, Core) ->
     {Packet, Core}.
 
-try_dm([], Packet, Core) ->
+try_to_us([], Packet, Core) ->
     {Packet#{decrypt_error => bad_mac}, Core};
-try_dm([{Pub, Contact} | Rest], Packet, #core{private_key = Priv} = Core) ->
+try_to_us([{Pub, Contact} | Rest], Packet, #core{private_key = Priv} = Core) ->
     case contact_secret(Contact, Priv, Pub) of
         {error, _Reason} ->
-            try_dm(Rest, Packet, Core);
+            try_to_us(Rest, Packet, Core);
         {ok, Secret} ->
             case meshcore_protocol:decrypt_shared(Secret, Packet) of
                 {ok, Decrypted} ->
                     {with_sender_name(Decrypted#{sender_pubkey => Pub}, Contact),
                         cache_secret(Pub, Contact, Secret, Core)};
                 {error, _} ->
-                    try_dm(Rest, Packet, Core)
+                    try_to_us(Rest, Packet, Core)
             end
     end.
 
