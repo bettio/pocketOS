@@ -321,7 +321,8 @@ shared_secret(OurSeed, PeerEdPub) ->
 
 %% Decrypt a PKI message with a 32-byte shared secret (HMAC on the full
 %% secret, AES key = its first 16 bytes). A txt_msg yields the text-message
-%% inner fields; request-style payloads yield timestamp + req_data.
+%% inner fields; a path yields the returned route plus its bundled extra;
+%% request-style payloads yield timestamp + req_data.
 -spec decrypt_shared(binary(), packet()) -> {ok, packet()} | {error, atom()}.
 decrypt_shared(Secret, #{cipher_mac := Mac, ciphertext := CT} = Packet) when
     byte_size(Secret) =:= 32
@@ -339,6 +340,21 @@ decrypt_shared(_Secret, _Packet) ->
 
 parse_shared_inner(Plain, #{type := txt_msg} = Packet) ->
     parse_msg_inner(Plain, Packet);
+parse_shared_inner(<<HashSizeCode:2, HopCount:6, Rest/binary>>, #{type := path} = Packet) ->
+    HashSize = HashSizeCode + 1,
+    PathLen = HopCount * HashSize,
+    case Rest of
+        <<ReturnPath:PathLen/binary, ExtraTypeInt, Extra/binary>> ->
+            {ok,
+                without_cipher(Packet#{
+                    return_hash_size => HashSize,
+                    return_path => ReturnPath,
+                    extra_type => int_to_type(ExtraTypeInt),
+                    extra => Extra
+                })};
+        _ ->
+            {error, short_plaintext}
+    end;
 parse_shared_inner(<<Timestamp:32/little-unsigned, ReqData/binary>>, Packet) ->
     {ok,
         without_cipher(Packet#{timestamp => Timestamp, req_data => strip_trailing_nuls(ReqData)})};

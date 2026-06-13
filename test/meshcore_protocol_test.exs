@@ -543,6 +543,35 @@ defmodule MeshcoreProtocolTest do
              inner.(%{return_path: <<0xAA, 0xBB>>, return_hash_size: 2})
   end
 
+  test "a PATH return round-trips through encrypt_shared/serialize/parse/decrypt_shared" do
+    {:ok, secret} = pki_secret()
+    ack = <<1, 2, 3, 4, 5, 6>>
+
+    sealed =
+      :meshcore_protocol.encrypt_shared(secret, %{
+        route: :flood,
+        type: :path,
+        version: 0,
+        hash_size: 1,
+        path: <<>>,
+        dest_hash: 0x5E,
+        src_hash: 0xF2,
+        return_path: <<0xAA, 0xBB>>,
+        return_hash_size: 2,
+        extra_type: :ack,
+        extra: ack
+      })
+
+    {:ok, pkt} = :meshcore_protocol.parse(:meshcore_protocol.serialize(sealed))
+    {:ok, dec} = :meshcore_protocol.decrypt_shared(secret, pkt)
+    assert dec.return_path == <<0xAA, 0xBB>>
+    assert dec.return_hash_size == 2
+    assert dec.extra_type == :ack
+    assert binary_part(dec.extra, 0, 6) == ack
+    refute Map.has_key?(dec, :ciphertext)
+    refute Map.has_key?(dec, :cipher_mac)
+  end
+
   defp pki_secret do
     {bob_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
     {_, alice_priv} = :crypto.generate_key(:eddsa, :ed25519)
