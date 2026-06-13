@@ -86,6 +86,23 @@ defmodule MeshcoreServerTest do
     assert dec.text == "direct hi"
   end
 
+  test "send_dm_async returns a ref and transmits the dm" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {:ok, srv} = :meshcore_server.start_link({TestRadio, TestRadio, self()}, opts)
+    {recipient_pub, recipient_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    assert {:ok, ref} = :meshcore_server.send_dm_async(srv, recipient_pub, "tracked")
+    assert is_reference(ref)
+
+    assert_receive {:tx, wire}
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    assert pkt.type == :txt_msg
+    {:ok, secret} = :meshcore_protocol.shared_secret(recipient_priv, our_pub)
+    {:ok, dec} = :meshcore_protocol.decrypt_shared(secret, pkt)
+    assert dec.text == "tracked"
+  end
+
   test "for_log drops the bulky advert binaries but keeps the decoded fields" do
     {:ok, pkt} = :meshcore_protocol.parse(@advert)
     logged = :meshcore_server.for_log(:meshcore_server_core.enrich(pkt, channel_key()))

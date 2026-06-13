@@ -17,7 +17,8 @@
     start_link/3,
     handle_payload/4,
     send_group_text/2,
-    send_dm/3
+    send_dm/3,
+    send_dm_async/3
 ]).
 
 %% Pure presentation helper, exported for tests.
@@ -52,6 +53,13 @@ send_group_text(Server, Message) ->
 -spec send_dm(gen_server:server_ref(), binary(), binary()) -> ok | {error, term()}.
 send_dm(Server, RecipientPub, Message) ->
     gen_server:call(Server, {send_dm, RecipientPub, Message}).
+
+%% Send a delivery-tracked direct message. Returns {ok, Ref}; the calling process
+%% later receives {delivery_update, Ref, {ack, _} | {nak, Reason}}.
+-spec send_dm_async(gen_server:server_ref(), binary(), binary()) ->
+    {ok, reference()} | {error, term()}.
+send_dm_async(Server, RecipientPub, Message) ->
+    gen_server:call(Server, {send_dm_async, RecipientPub, Message}).
 
 init([Radio, Opts]) ->
     erlang:display(
@@ -89,8 +97,26 @@ handle_call({send_dm, RecipientPub, Message}, _From, #state{callbacks = Callback
     run_effects(Effects, Callbacks),
     State1 = pump_tx(State#state{core = Core1}),
     {reply, Reply, State1};
+handle_call(
+    {send_dm_async, RecipientPub, Message},
+    {Pid, _Tag},
+    #state{callbacks = Callbacks, core = Core0} = State
+) ->
+    Ref = make_ref(),
+    Env = #{
+        wall_s => erlang:system_time(second),
+        mono_ms => erlang:monotonic_time(millisecond),
+        notify => {Pid, Ref}
+    },
+    {Reply, Core1, Effects} = meshcore_server_core:handle_send_dm(RecipientPub, Message, Env, Core0),
+    run_effects(Effects, Callbacks),
+    State1 = pump_tx(State#state{core = Core1}),
+    {reply, async_reply(Reply, Ref), State1};
 handle_call(_Msg, _From, State) ->
     {reply, error, State}.
+
+async_reply(ok, Ref) -> {ok, Ref};
+async_reply({error, _} = Error, _Ref) -> Error.
 
 handle_cast(_Msg, State) ->
     {noreply, State}.
@@ -103,6 +129,11 @@ handle_info(periodic, #state{callbacks = Callbacks, core = Core0} = State) ->
     {noreply, State1};
 handle_info(tx_pump, State) ->
     {noreply, pump_tx(State)};
+handle_info({ack_timeout, AckHash}, #state{callbacks = Callbacks, core = Core0} = State) ->
+    {Core1, Effects} = meshcore_server_core:handle_ack_timeout(AckHash, Core0),
+    run_effects(Effects, Callbacks),
+    State1 = pump_tx(State#state{core = Core1}),
+    {noreply, State1};
 handle_info(_Msg, State) ->
     {noreply, State}.
 
@@ -118,6 +149,9 @@ run_effects([{set_timer, Ms, Msg} | Rest], Callbacks) ->
 run_effects([{deliver, Packet} | Rest], Callbacks) ->
     erlang:display({meshcore_rx, for_log(Packet)}),
     deliver(Callbacks, Packet),
+    run_effects(Rest, Callbacks);
+run_effects([{notify, {Pid, Ref}, Status} | Rest], Callbacks) ->
+    Pid ! {delivery_update, Ref, Status},
     run_effects(Rest, Callbacks).
 
 deliver(undefined, _Packet) ->

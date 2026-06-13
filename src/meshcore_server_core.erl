@@ -24,6 +24,7 @@
     handle_periodic/2,
     handle_send_group_text/3,
     handle_send_dm/4,
+    handle_ack_timeout/2,
     enrich/2,
     take_due/2,
     take_one_due/2,
@@ -32,7 +33,7 @@
     handle_tx_results/3
 ]).
 
--export_type([core_state/0, effect/0, env/0]).
+-export_type([core_state/0, effect/0, env/0, delivery_status/0]).
 
 -record(core, {
     public_key :: binary() | undefined,
@@ -42,6 +43,8 @@
     tx_queue = [] :: [tx_intent()],
     seen = [] :: [binary()],
     contacts = [] :: [{binary(), map()}],
+    %% delivery-tracked DM sends, keyed by the 4-byte ack hash
+    pending = #{} :: #{binary() => map()},
     %% discover-reply rate limiter: {window_start_ms, count}
     discover_rl = {0, 0} :: {integer(), non_neg_integer()},
     %% modulation params, for the airtime-derived discover-reply jitter
@@ -55,7 +58,10 @@
 
 -type effect() ::
     {deliver, Packet :: map()}
-    | {set_timer, Ms :: non_neg_integer(), Msg :: term()}.
+    | {set_timer, Ms :: non_neg_integer(), Msg :: term()}
+    | {notify, {pid(), reference()}, delivery_status()}.
+
+-type delivery_status() :: {ack, map()} | {nak, atom()}.
 
 -type env() :: #{
     wall_s => non_neg_integer(),
@@ -66,7 +72,8 @@
 -type tx_intent() :: #{
     payload := binary(),
     not_before := now | integer(),
-    attempts => non_neg_integer()
+    attempts => non_neg_integer(),
+    ref => binary()
 }.
 
 -define(INITIAL_PERIODIC_MS, 500).
@@ -86,6 +93,9 @@
 -define(DISCOVER_DELAY_WIDEN, 4).
 
 -define(ACK_DELAY_MS, 200).
+
+-define(DM_RETX, 3).
+-define(DM_RETX_PROCESSING_MS, 4000).
 
 %%------------------------------------------------------------------------------
 %% Construction
@@ -568,14 +578,14 @@ handle_send_dm(
     RecipientPub,
     Message,
     #{wall_s := NowS} = Env,
-    #core{public_key = <<OurFirst, _/binary>>, private_key = Priv} = Core
+    #core{public_key = <<OurFirst, _/binary>> = OurPub, private_key = Priv} = Core
 ) when is_binary(Priv), byte_size(RecipientPub) =:= 32 ->
     case resolve_secret(RecipientPub, maps:get(mono_ms, Env, 0), Core) of
         {error, Reason} ->
             {{error, Reason}, Core, []};
         {ok, Secret, Core1} ->
             <<DestFirst, _/binary>> = RecipientPub,
-            Sealed = meshcore_protocol:encrypt_shared(Secret, #{
+            Plain = #{
                 route => flood,
                 type => txt_msg,
                 version => 0,
@@ -584,16 +594,41 @@ handle_send_dm(
                 dest_hash => DestFirst,
                 src_hash => OurFirst,
                 timestamp => NowS,
+                txt_type => 0,
+                attempt => 0,
                 text => Message
-            }),
+            },
+            Sealed = meshcore_protocol:encrypt_shared(Secret, Plain),
             Payload = meshcore_protocol:serialize(Sealed),
+            <<AckHash:4/binary, _/binary>> = meshcore_protocol:ack_payload(Plain, OurPub, 0),
             ?MESH_TRACE("[meshcore] tx dm dest=~p bytes=~p~n", [DestFirst, byte_size(Payload)]),
-            {ok,
-                enqueue_tx(Payload, now, remember_seen(meshcore_protocol:packet_hash(Sealed), Core1)),
-                []}
+            Core2 = remember_seen(meshcore_protocol:packet_hash(Sealed), Core1),
+            send_dm_intent(Payload, AckHash, Env, Core2)
     end;
 handle_send_dm(_RecipientPub, _Message, _Env, Core) ->
     {{error, no_identity}, Core, []}.
+
+%% Enqueue the sealed DM. With a notify target, track delivery: a pending entry
+%% keyed by the 4-byte ack hash, a ref-tagged intent the ack can cancel, and an
+%% ack-timeout timer. Otherwise fire-and-forget.
+send_dm_intent(Payload, AckHash, #{notify := Notify}, #core{pending = Pending} = Core) ->
+    Interval = retransmission_ms(byte_size(Payload), Core),
+    Entry = #{
+        payload => Payload,
+        notify => Notify,
+        tries_left => ?DM_RETX - 1,
+        interval_ms => Interval
+    },
+    Core1 = Core#core{pending = maps:put(AckHash, Entry, Pending)},
+    Core2 = enqueue_intent(#{payload => Payload, not_before => now, ref => AckHash}, Core1),
+    {ok, Core2, [{set_timer, Interval, {ack_timeout, AckHash}}]};
+send_dm_intent(Payload, _AckHash, _Env, Core) ->
+    {ok, enqueue_tx(Payload, now, Core), []}.
+
+%% Round-trip time budget for a tracked DM: our flood out + the peer's flooded
+%% path-return back, plus a fixed processing/propagation margin.
+retransmission_ms(WireBytes, Core) ->
+    2 * packet_airtime_ms(WireBytes, Core) + ?DM_RETX_PROCESSING_MS.
 
 %% Resolve (and cache) the pairwise secret for a recipient pubkey. Reuses a
 %% known contact's cached secret, otherwise derives it and stores it -- a contact
@@ -617,6 +652,31 @@ resolve_secret(Pub, NowMs, #core{private_key = Priv, contacts = Contacts} = Core
                     Error
             end
     end.
+
+%% Retransmit a tracked DM and re-arm, or give up with a {nak, timeout}. A
+%% missing entry is a stale timer for an already-resolved send.
+-spec handle_ack_timeout(binary(), core_state()) -> {core_state(), [effect()]}.
+handle_ack_timeout(AckHash, #core{pending = Pending} = Core) ->
+    case maps:find(AckHash, Pending) of
+        {ok, #{tries_left := 0} = Entry} ->
+            ?MESH_TRACE("[meshcore] dm send failed~n", []),
+            Core1 = cancel_intents(AckHash, Core#core{pending = maps:remove(AckHash, Pending)}),
+            {Core1, notify_effects(Entry, {nak, timeout})};
+        {ok, #{tries_left := Tries, interval_ms := Interval, payload := Payload} = Entry} ->
+            ?MESH_TRACE("[meshcore] dm retransmit tries_left=~p~n", [Tries - 1]),
+            Core1 = Core#core{pending = maps:put(AckHash, Entry#{tries_left => Tries - 1}, Pending)},
+            Core2 = enqueue_intent(#{payload => Payload, not_before => now, ref => AckHash}, Core1),
+            {Core2, [{set_timer, Interval, {ack_timeout, AckHash}}]};
+        error ->
+            {Core, []}
+    end.
+
+%% Drop queued intents tagged with Ref.
+cancel_intents(Ref, #core{tx_queue = Queue} = Core) ->
+    Core#core{tx_queue = [I || I <- Queue, maps:get(ref, I, undefined) =/= Ref]}.
+
+notify_effects(#{notify := {Pid, Ref}}, Status) -> [{notify, {Pid, Ref}, Status}];
+notify_effects(_Entry, _Status) -> [].
 
 %%------------------------------------------------------------------------------
 %% Seen-frame dedup (a capped list of packet hashes, newest first)

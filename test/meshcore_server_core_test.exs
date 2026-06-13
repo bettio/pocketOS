@@ -189,6 +189,79 @@ defmodule MeshcoreServerCoreTest do
     assert delivered.sender_pubkey == recipient_pub
   end
 
+  # ---- handle_send_dm: delivery tracking ----
+
+  test "a tracked send enqueues with a ref and arms an ack timeout" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {recipient_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+    notify = {self(), make_ref()}
+
+    {reply, core1, effects} =
+      :meshcore_server_core.handle_send_dm(
+        recipient_pub,
+        "track me",
+        tx_env(%{wall_s: 1_700_000_000, notify: notify}),
+        core(opts)
+      )
+
+    assert reply == :ok
+    assert [{:set_timer, interval, {:ack_timeout, ack_hash}}] = effects
+    assert is_integer(interval) and interval > 0
+    assert byte_size(ack_hash) == 4
+
+    # the queued intent is tagged with the ack hash, so the ack can cancel it
+    {[intent], _} = :meshcore_server_core.take_due(core1, 1_000_000)
+    assert intent.ref == ack_hash
+
+    # the ack hash is exactly what the recipient computes over our plaintext + key
+    <<expected::4-bytes, _::binary>> =
+      :meshcore_protocol.ack_payload(
+        %{timestamp: 1_700_000_000, txt_type: 0, attempt: 0, text: "track me"},
+        our_pub,
+        0
+      )
+
+    assert ack_hash == expected
+  end
+
+  # ---- handle_ack_timeout ----
+
+  test "ack timeout retransmits the same payload up to the limit, then naks" do
+    opts = identity_opts()
+    {recipient_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+    notify = {self(), make_ref()}
+
+    {:ok, core1, [{:set_timer, _, {:ack_timeout, ack_hash}}]} =
+      :meshcore_server_core.handle_send_dm(
+        recipient_pub,
+        "hi",
+        tx_env(%{wall_s: 1, notify: notify}),
+        core(opts)
+      )
+
+    {[first], core2} = :meshcore_server_core.take_due(core1, 1_000_000)
+
+    # two retransmits (DM_RETX = 3 total transmissions), each the same bytes + ref
+    core_after =
+      Enum.reduce(1..2, core2, fn _, c ->
+        {c1, effects} = :meshcore_server_core.handle_ack_timeout(ack_hash, c)
+        assert [{:set_timer, _, {:ack_timeout, ^ack_hash}}] = effects
+        {[retx], c2} = :meshcore_server_core.take_due(c1, 1_000_000)
+        assert retx.payload == first.payload
+        assert retx.ref == ack_hash
+        c2
+      end)
+
+    # the next timeout gives up
+    {_core, effects} = :meshcore_server_core.handle_ack_timeout(ack_hash, core_after)
+    assert effects == [{:notify, notify, {:nak, :timeout}}]
+  end
+
+  test "ack timeout for an unknown hash is a no-op" do
+    assert {_core, []} = :meshcore_server_core.handle_ack_timeout(<<0, 0, 0, 0>>, core())
+  end
+
   # ---- handle_tx_results ----
 
   defp taken_advert_intent do
