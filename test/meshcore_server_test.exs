@@ -19,8 +19,21 @@ defmodule MeshcoreServerTest do
 
   defp channel_key, do: :meshcore_protocol.default_public_channel_key()
 
+  defp identity_opts do
+    {pub, priv} = :crypto.generate_key(:eddsa, :ed25519)
+    [public_key: pub, private_key: priv, name: "pocketOS T1"]
+  end
+
   defmodule CbSink do
     def message_cb(pkt), do: send(:meshcore_cb_sink, {:message_cb, pkt})
+  end
+
+  # Radio stub that forwards each broadcast to the handle pid (the test process).
+  defmodule TestRadio do
+    def broadcast(pid, payload) do
+      send(pid, {:tx, payload})
+      :ok
+    end
   end
 
   test "delivered frames are handed to the callbacks module" do
@@ -42,6 +55,19 @@ defmodule MeshcoreServerTest do
     assert :meshcore_server.handle_payload(srv, iface, @grp_txt, attrs) == :ok
     assert :meshcore_server.handle_payload(srv, iface, @advert, attrs) == :ok
     assert :meshcore_server.handle_payload(srv, iface, <<>>, attrs) == :next
+  end
+
+  test "send_group_text broadcasts a decryptable flood grp_txt" do
+    {:ok, srv} = :meshcore_server.start_link({TestRadio, TestRadio, self()}, identity_opts())
+
+    assert :meshcore_server.send_group_text(srv, "hello mesh") == :ok
+
+    assert_receive {:tx, wire}
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    assert pkt.type == :grp_txt
+    assert pkt.route == :flood
+    {:ok, dec} = :meshcore_protocol.decrypt(pkt)
+    assert dec.text == "pocketOS T1: hello mesh"
   end
 
   test "for_log drops the bulky advert binaries but keeps the decoded fields" do

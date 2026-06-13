@@ -22,6 +22,7 @@
     init/1,
     handle_rx/4,
     handle_periodic/2,
+    handle_send_group_text/3,
     enrich/2,
     take_due/2,
     take_one_due/2,
@@ -521,6 +522,36 @@ ack_reply(Route, _Dm, _SenderPub, Ack, _Core) when Route =:= direct; Route =:= t
 enqueue_reply(Packet, NotBefore, Core) ->
     Payload = meshcore_protocol:serialize(Packet),
     enqueue_tx(Payload, NotBefore, remember_seen(meshcore_protocol:packet_hash(Packet), Core)).
+
+%%------------------------------------------------------------------------------
+%% Send
+%%------------------------------------------------------------------------------
+
+%% Send channel group text on the configured channel. The group envelope carries
+%% no sender identity, so our name is prepended into the encrypted text. Needs a
+%% name; without one the reply is {error, no_identity}.
+-spec handle_send_group_text(binary(), env(), core_state()) ->
+    {ok | {error, term()}, core_state(), [effect()]}.
+handle_send_group_text(Message, #{wall_s := NowS}, #core{name = Name, channel_key = Key} = Core) when
+    is_binary(Name)
+->
+    Packet = meshcore_protocol:encrypt(
+        #{
+            route => flood,
+            type => grp_txt,
+            version => 0,
+            hash_size => 1,
+            path => <<>>,
+            timestamp => NowS,
+            text => <<Name/binary, ": ", Message/binary>>
+        },
+        Key
+    ),
+    Payload = meshcore_protocol:serialize(Packet),
+    ?MESH_TRACE("[meshcore] tx grp_txt bytes=~p~n", [byte_size(Payload)]),
+    {ok, enqueue_tx(Payload, now, remember_seen(meshcore_protocol:packet_hash(Packet), Core)), []};
+handle_send_group_text(_Message, _Env, Core) ->
+    {{error, no_identity}, Core, []}.
 
 %%------------------------------------------------------------------------------
 %% Seen-frame dedup (a capped list of packet hashes, newest first)

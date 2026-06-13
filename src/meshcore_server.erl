@@ -15,7 +15,8 @@
 -export([
     start_link/2,
     start_link/3,
-    handle_payload/4
+    handle_payload/4,
+    send_group_text/2
 ]).
 
 %% Pure presentation helper, exported for tests.
@@ -41,6 +42,11 @@ start_link(Name, Radio, Opts) ->
 handle_payload(Server, {_IfaceId, _Pid} = Iface, Payload, Attributes) ->
     gen_server:call(Server, {handle_payload, Iface, Payload, Attributes}).
 
+%% Send channel group text on the configured channel (our name is prepended).
+-spec send_group_text(gen_server:server_ref(), binary()) -> ok | {error, term()}.
+send_group_text(Server, Message) ->
+    gen_server:call(Server, {send_group_text, Message}).
+
 init([Radio, Opts]) ->
     erlang:display(
         {meshcore_crypto, eddsa_available, meshcore_protocol:eddsa_available(), crypto:info_lib()}
@@ -65,6 +71,12 @@ handle_call(
         _Invalid ->
             {reply, next, State}
     end;
+handle_call({send_group_text, Message}, _From, #state{callbacks = Callbacks, core = Core0} = State) ->
+    Env = #{wall_s => erlang:system_time(second)},
+    {Reply, Core1, Effects} = meshcore_server_core:handle_send_group_text(Message, Env, Core0),
+    run_effects(Effects, Callbacks),
+    State1 = pump_tx(State#state{core = Core1}),
+    {reply, Reply, State1};
 handle_call(_Msg, _From, State) ->
     {reply, error, State}.
 

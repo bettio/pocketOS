@@ -86,6 +86,43 @@ defmodule MeshcoreServerCoreTest do
     assert drain(c) == []
   end
 
+  # ---- handle_send_group_text ----
+
+  test "send group text enqueues a flood grp_txt with our name prepended" do
+    opts = identity_opts()
+
+    {reply, core1, effects} =
+      :meshcore_server_core.handle_send_group_text(
+        "hi there",
+        %{wall_s: 1_700_000_000},
+        core(opts)
+      )
+
+    assert reply == :ok
+    assert effects == []
+
+    assert [wire] = drain(core1)
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    assert pkt.route == :flood
+    assert pkt.type == :grp_txt
+    assert pkt.channel_hash == 0x11
+
+    {:ok, dec} = :meshcore_protocol.decrypt(pkt)
+    assert dec.text == "pocketOS T1: hi there"
+    assert dec.timestamp == 1_700_000_000
+
+    # our own TX is remembered, so a repeater echo of it is dropped
+    assert {:ok, _core2, []} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+  end
+
+  test "send group text without a name is rejected" do
+    {reply, _core, effects} =
+      :meshcore_server_core.handle_send_group_text("hi", %{wall_s: 1}, core())
+
+    assert reply == {:error, :no_identity}
+    assert effects == []
+  end
+
   # ---- handle_tx_results ----
 
   defp taken_advert_intent do
