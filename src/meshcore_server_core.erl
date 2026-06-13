@@ -23,6 +23,7 @@
     handle_rx/4,
     handle_periodic/2,
     handle_send_group_text/3,
+    handle_send_dm/4,
     enrich/2,
     take_due/2,
     take_one_due/2,
@@ -552,6 +553,65 @@ handle_send_group_text(Message, #{wall_s := NowS}, #core{name = Name, channel_ke
     {ok, enqueue_tx(Payload, now, remember_seen(meshcore_protocol:packet_hash(Packet), Core)), []};
 handle_send_group_text(_Message, _Env, Core) ->
     {{error, no_identity}, Core, []}.
+
+%% Send a flood direct message to a recipient (its 32-byte Ed25519 public key),
+%% sealed under the pairwise X25519 secret. Needs our identity; without it the
+%% reply is {error, no_identity}, and {error, Reason} if the secret can't derive.
+-spec handle_send_dm(binary(), binary(), env(), core_state()) ->
+    {ok | {error, term()}, core_state(), [effect()]}.
+handle_send_dm(
+    RecipientPub,
+    Message,
+    #{wall_s := NowS} = Env,
+    #core{public_key = <<OurFirst, _/binary>>, private_key = Priv} = Core
+) when is_binary(Priv), byte_size(RecipientPub) =:= 32 ->
+    case resolve_secret(RecipientPub, maps:get(mono_ms, Env, 0), Core) of
+        {error, Reason} ->
+            {{error, Reason}, Core, []};
+        {ok, Secret, Core1} ->
+            <<DestFirst, _/binary>> = RecipientPub,
+            Sealed = meshcore_protocol:encrypt_shared(Secret, #{
+                route => flood,
+                type => txt_msg,
+                version => 0,
+                hash_size => 1,
+                path => <<>>,
+                dest_hash => DestFirst,
+                src_hash => OurFirst,
+                timestamp => NowS,
+                text => Message
+            }),
+            Payload = meshcore_protocol:serialize(Sealed),
+            ?MESH_TRACE("[meshcore] tx dm dest=~p bytes=~p~n", [DestFirst, byte_size(Payload)]),
+            {ok,
+                enqueue_tx(Payload, now, remember_seen(meshcore_protocol:packet_hash(Sealed), Core1)),
+                []}
+    end;
+handle_send_dm(_RecipientPub, _Message, _Env, Core) ->
+    {{error, no_identity}, Core, []}.
+
+%% Resolve (and cache) the pairwise secret for a recipient pubkey. Reuses a
+%% known contact's cached secret, otherwise derives it and stores it -- a contact
+%% with the secret is what lets a later path-return ack from the recipient decrypt.
+resolve_secret(Pub, NowMs, #core{private_key = Priv, contacts = Contacts} = Core) ->
+    case contact_find(Pub, Contacts) of
+        {ok, Contact} ->
+            case contact_secret(Contact, Priv, Pub) of
+                {ok, Secret} -> {ok, Secret, cache_secret(Pub, Contact, Secret, Core)};
+                {error, _} = Error -> Error
+            end;
+        error ->
+            case meshcore_protocol:shared_secret(Priv, Pub) of
+                {ok, Secret} ->
+                    Contact = #{last_heard => NowMs, secret => Secret},
+                    Core1 = Core#core{
+                        contacts = contact_store(Pub, Contact, contact_make_room(Contacts))
+                    },
+                    {ok, Secret, Core1};
+                {error, _} = Error ->
+                    Error
+            end
+    end.
 
 %%------------------------------------------------------------------------------
 %% Seen-frame dedup (a capped list of packet hashes, newest first)

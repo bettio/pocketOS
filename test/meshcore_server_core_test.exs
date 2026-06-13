@@ -123,6 +123,72 @@ defmodule MeshcoreServerCoreTest do
     assert effects == []
   end
 
+  # ---- handle_send_dm (untracked) ----
+
+  test "send dm enqueues a flood txt_msg the recipient can decrypt" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {recipient_pub, recipient_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {reply, core1, effects} =
+      :meshcore_server_core.handle_send_dm(
+        recipient_pub,
+        "ping",
+        tx_env(%{wall_s: 1_700_000_000}),
+        core(opts)
+      )
+
+    assert reply == :ok
+    assert effects == []
+
+    assert [wire] = drain(core1)
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    assert pkt.type == :txt_msg
+    assert pkt.route == :flood
+    <<dest_first, _::binary>> = recipient_pub
+    <<src_first, _::binary>> = our_pub
+    assert pkt.dest_hash == dest_first
+    assert pkt.src_hash == src_first
+
+    {:ok, secret} = :meshcore_protocol.shared_secret(recipient_priv, our_pub)
+    {:ok, dec} = :meshcore_protocol.decrypt_shared(secret, pkt)
+    assert dec.text == "ping"
+    assert dec.timestamp == 1_700_000_000
+  end
+
+  test "send dm without an identity is rejected" do
+    {recipient_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {reply, _core, []} =
+      :meshcore_server_core.handle_send_dm(recipient_pub, "x", tx_env(%{wall_s: 1}), core())
+
+    assert reply == {:error, :no_identity}
+  end
+
+  test "send dm caches the recipient secret, enabling inbound decrypt without an advert" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {recipient_pub, recipient_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, core1, _} =
+      :meshcore_server_core.handle_send_dm(
+        recipient_pub,
+        "hi",
+        tx_env(%{wall_s: 1_700_000_000}),
+        core(opts)
+      )
+
+    # inbound DM from the recipient (whose advert we never heard) decrypts via
+    # the contact the send cached
+    inbound = dm_frame(our_pub, recipient_pub, recipient_priv, "reply text", 1_700_000_100)
+    {:ok, pkt} = :meshcore_protocol.parse(inbound)
+    {:ok, _core2, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [{:deliver, delivered}] = effects
+    assert delivered.text == "reply text"
+    assert delivered.sender_pubkey == recipient_pub
+  end
+
   # ---- handle_tx_results ----
 
   defp taken_advert_intent do

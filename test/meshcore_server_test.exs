@@ -70,6 +70,22 @@ defmodule MeshcoreServerTest do
     assert dec.text == "pocketOS T1: hello mesh"
   end
 
+  test "send_dm broadcasts a flood txt_msg the recipient can decrypt" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {:ok, srv} = :meshcore_server.start_link({TestRadio, TestRadio, self()}, opts)
+    {recipient_pub, recipient_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    assert :meshcore_server.send_dm(srv, recipient_pub, "direct hi") == :ok
+
+    assert_receive {:tx, wire}
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    assert pkt.type == :txt_msg
+    {:ok, secret} = :meshcore_protocol.shared_secret(recipient_priv, our_pub)
+    {:ok, dec} = :meshcore_protocol.decrypt_shared(secret, pkt)
+    assert dec.text == "direct hi"
+  end
+
   test "for_log drops the bulky advert binaries but keeps the decoded fields" do
     {:ok, pkt} = :meshcore_protocol.parse(@advert)
     logged = :meshcore_server.for_log(:meshcore_server_core.enrich(pkt, channel_key()))
