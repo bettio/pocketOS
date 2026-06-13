@@ -26,7 +26,20 @@ defmodule RadioLauncher do
     complete_config = Map.merge(meshtastic_medium_fast_config, periph_config)
     default_channel_name = "MediumFast"
 
-    {public_key, private_key} = NodeKey.load_or_generate("NVS0:/nodekey.bin")
+    {ed_keypair, {public_key, private_key}} =
+      if :meshcore_protocol.eddsa_available() do
+        {ed_pub, ed_priv} =
+          NodeKey.load_or_generate(
+            "NVS0:/nodekey.bin",
+            fn -> :crypto.generate_key(:eddsa, :ed25519) end,
+            &valid_ed25519?/1
+          )
+
+        {{ed_pub, ed_priv},
+         {:ed25519_x25519.ed_pub_to_x25519(ed_pub), :ed25519_x25519.ed_secret_to_x25519(ed_priv)}}
+      else
+        {nil, NodeKey.load_or_generate("NVS0:/nodekey.bin")}
+      end
 
     id_256 = :crypto.hash(:sha256, public_key)
     <<node_id::little-unsigned-integer-32, _discard::binary>> = id_256
@@ -63,19 +76,16 @@ defmodule RadioLauncher do
     MeshcoreCallbacks.init()
 
     meshcore_identity =
-      if :meshcore_protocol.eddsa_available() do
-        {mc_pub, mc_priv} =
-          NodeKey.load_or_generate("FS0:/mckey.bin", fn ->
-            :crypto.generate_key(:eddsa, :ed25519)
-          end)
+      case ed_keypair do
+        {ed_pub, ed_priv} ->
+          [
+            public_key: ed_pub,
+            private_key: ed_priv,
+            name: Map.get(meshtcfg, :long_name, "pocketOS #{short_node_id}")
+          ]
 
-        [
-          public_key: mc_pub,
-          private_key: mc_priv,
-          name: Map.get(meshtcfg, :long_name, "pocketOS #{short_node_id}")
-        ]
-      else
-        []
+        nil ->
+          []
       end
 
     meshcore_opts =
@@ -103,6 +113,11 @@ defmodule RadioLauncher do
            preamble_length: Map.fetch!(complete_config, :preamble_length)
          ]}
       ])
+  end
+
+  defp valid_ed25519?({pub, priv}) do
+    sig = :crypto.sign(:eddsa, :none, "nodekey", [priv, :ed25519])
+    :crypto.verify(:eddsa, :none, "nodekey", sig, [pub, :ed25519])
   end
 
   defp lpad(s, n) when byte_size(s) >= n do

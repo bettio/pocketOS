@@ -1,9 +1,18 @@
 defmodule NodeKey do
-  def load_or_generate(path, keygen \\ fn -> :crypto.generate_key(:eddh, :x25519) end) do
+  def load_or_generate(
+        path,
+        keygen \\ fn -> :crypto.generate_key(:eddh, :x25519) end,
+        valid? \\ fn _keypair -> true end
+      ) do
     case load(path) do
       {:ok, keypair} ->
-        IO.puts("[mesh] NodeKey: loaded existing keypair from #{path}")
-        keypair
+        if valid?.(keypair) do
+          IO.puts("[mesh] NodeKey: loaded existing keypair from #{path}")
+          keypair
+        else
+          IO.puts("[mesh] NodeKey: keypair at #{path} failed validation, generating fresh")
+          generate_and_persist(path, keygen)
+        end
 
       error ->
         IO.puts("[mesh] NodeKey: load #{path} failed (#{inspect(error)}), generating fresh")
