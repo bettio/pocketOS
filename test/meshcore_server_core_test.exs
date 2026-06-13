@@ -262,6 +262,81 @@ defmodule MeshcoreServerCoreTest do
     assert {_core, []} = :meshcore_server_core.handle_ack_timeout(<<0, 0, 0, 0>>, core())
   end
 
+  # ---- handle_rx: tracked-dm ack resolution ----
+
+  test "rx resolves a tracked dm when the bundled path-return ack arrives" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {recipient_pub, recipient_priv} = :crypto.generate_key(:eddsa, :ed25519)
+    notify = {self(), make_ref()}
+
+    {:ok, core1, [{:set_timer, _, {:ack_timeout, ack_hash}}]} =
+      :meshcore_server_core.handle_send_dm(
+        recipient_pub,
+        "deliver me",
+        tx_env(%{wall_s: 1_700_000_000, notify: notify}),
+        core(opts)
+      )
+
+    # the recipient floods a path-return bundling the 4-byte ack hash
+    wire =
+      path_return_frame(our_pub, recipient_pub, recipient_priv, <<>>, ack_hash <> <<0, 0xAB>>)
+
+    {:ok, pkt} = :meshcore_protocol.parse(wire)
+    {:ok, core2, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [{:notify, ^notify, {:ack, %{}}}, {:deliver, _}] = effects
+    # the queued first transmission is cancelled
+    assert {[], _} = :meshcore_server_core.take_due(core2, 1_000_000)
+  end
+
+  test "rx resolves a tracked dm when a discrete ack arrives" do
+    opts = identity_opts()
+    {recipient_pub, _} = :crypto.generate_key(:eddsa, :ed25519)
+    notify = {self(), make_ref()}
+
+    {:ok, core1, [{:set_timer, _, {:ack_timeout, ack_hash}}]} =
+      :meshcore_server_core.handle_send_dm(
+        recipient_pub,
+        "x",
+        tx_env(%{wall_s: 1, notify: notify}),
+        core(opts)
+      )
+
+    ack = %{
+      route: :flood,
+      type: :ack,
+      version: 0,
+      hash_size: 1,
+      path: <<>>,
+      ack: ack_hash <> <<0, 1>>
+    }
+
+    {:ok, pkt} = :meshcore_protocol.parse(:meshcore_protocol.serialize(ack))
+    {:ok, core2, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core1)
+
+    assert [{:notify, ^notify, {:ack, %{}}}, {:deliver, _}] = effects
+    assert {[], _} = :meshcore_server_core.take_due(core2, 1_000_000)
+  end
+
+  test "rx ignores an ack that matches no pending send" do
+    opts = identity_opts()
+
+    ack = %{
+      route: :flood,
+      type: :ack,
+      version: 0,
+      hash_size: 1,
+      path: <<>>,
+      ack: <<9, 9, 9, 9, 0, 1>>
+    }
+
+    {:ok, pkt} = :meshcore_protocol.parse(:meshcore_protocol.serialize(ack))
+    {:ok, _core, effects} = :meshcore_server_core.handle_rx(pkt, @attrs, tx_env(), core(opts))
+
+    refute Enum.any?(effects, &match?({:notify, _, _}, &1))
+  end
+
   # ---- handle_tx_results ----
 
   defp taken_advert_intent do

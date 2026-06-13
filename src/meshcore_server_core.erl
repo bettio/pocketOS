@@ -163,8 +163,9 @@ handle_rx_new(Packet, Attributes, Env, #core{channel_key = ChannelKey} = Core0) 
             Core3 = maybe_learn_contact(Enriched, Env, Core2),
             Delivered = with_attributes(Enriched, Attributes),
             Core4 = maybe_reply_discover(Packet, Attributes, Env, Core3),
-            Core5 = maybe_ack_dm(Enriched, Env, Core4),
-            {ok, Core5, [{deliver, Delivered}]}
+            {Core5, AckEffects} = maybe_match_ack(Enriched, Core4),
+            Core6 = maybe_ack_dm(Enriched, Env, Core5),
+            {ok, Core6, AckEffects ++ [{deliver, Delivered}]}
     end.
 
 %% Consume only frames that validate as ours (signature, MAC or dest_hash
@@ -677,6 +678,26 @@ cancel_intents(Ref, #core{tx_queue = Queue} = Core) ->
 
 notify_effects(#{notify := {Pid, Ref}}, Status) -> [{notify, {Pid, Ref}, Status}];
 notify_effects(_Entry, _Status) -> [].
+
+%% Resolve a delivery-tracked DM when its ack returns -- a discrete ack packet or
+%% a path-return bundling the ack as extra. The first 4 bytes are matched against
+%% the pending table; an ack for nothing we are tracking is ignored.
+maybe_match_ack(#{type := ack, ack := <<AckHash:4/binary, _/binary>>}, Core) ->
+    resolve_pending(AckHash, Core);
+maybe_match_ack(#{type := path, extra_type := ack, extra := <<AckHash:4/binary, _/binary>>}, Core) ->
+    resolve_pending(AckHash, Core);
+maybe_match_ack(_Packet, Core) ->
+    {Core, []}.
+
+resolve_pending(AckHash, #core{pending = Pending} = Core) ->
+    case maps:find(AckHash, Pending) of
+        {ok, Entry} ->
+            ?MESH_TRACE("[meshcore] dm delivered~n", []),
+            Core1 = cancel_intents(AckHash, Core#core{pending = maps:remove(AckHash, Pending)}),
+            {Core1, notify_effects(Entry, {ack, #{}})};
+        error ->
+            {Core, []}
+    end.
 
 %%------------------------------------------------------------------------------
 %% Seen-frame dedup (a capped list of packet hashes, newest first)

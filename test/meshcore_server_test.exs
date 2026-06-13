@@ -103,6 +103,46 @@ defmodule MeshcoreServerTest do
     assert dec.text == "tracked"
   end
 
+  test "send_dm_async reports delivery when the peer's path-return ack arrives" do
+    opts = identity_opts()
+    our_pub = Keyword.fetch!(opts, :public_key)
+    {:ok, srv} = :meshcore_server.start_link({TestRadio, TestRadio, self()}, opts)
+    {recipient_pub, recipient_priv} = :crypto.generate_key(:eddsa, :ed25519)
+
+    {:ok, ref} = :meshcore_server.send_dm_async(srv, recipient_pub, "ping")
+
+    # capture our DM and compute the ack the recipient would return for it
+    assert_receive {:tx, dm_wire}
+    {:ok, dm} = :meshcore_protocol.parse(dm_wire)
+    {:ok, secret} = :meshcore_protocol.shared_secret(recipient_priv, our_pub)
+    {:ok, plain} = :meshcore_protocol.decrypt_shared(secret, dm)
+    ack = :meshcore_protocol.ack_payload(plain, our_pub, 0xAB)
+
+    # the recipient floods a path-return bundling that ack back to us
+    <<dest, _::binary>> = our_pub
+    <<src, _::binary>> = recipient_pub
+
+    path =
+      :meshcore_protocol.serialize(
+        :meshcore_protocol.encrypt_shared(secret, %{
+          route: :flood,
+          type: :path,
+          version: 0,
+          hash_size: 1,
+          path: <<>>,
+          dest_hash: dest,
+          src_hash: src,
+          return_path: <<>>,
+          extra_type: :ack,
+          extra: ack
+        })
+      )
+
+    :ok = :meshcore_server.handle_payload(srv, {:test_iface, self()}, path, %{rssi: -50, snr: 6})
+
+    assert_receive {:delivery_update, ^ref, {:ack, _}}
+  end
+
   test "for_log drops the bulky advert binaries but keeps the decoded fields" do
     {:ok, pkt} = :meshcore_protocol.parse(@advert)
     logged = :meshcore_server.for_log(:meshcore_server_core.enrich(pkt, channel_key()))
