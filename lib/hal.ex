@@ -18,8 +18,8 @@ defmodule HAL do
     with {:ok, _} <- FSRegistry.start_link(),
          {:ok, fs0} <- StackedFS.start_link("./data/"),
          :ok <- FSRegistry.register_fs("FS0", fs0),
-         :ok <- FSRegistry.register_fs("NVS0", fs0) do
-      IO.puts("Registered fs: ./data as FS0 and NVS0")
+         :ok <- FSRegistry.register_fs("Config", fs0) do
+      IO.puts("Registered fs: ./data as FS0 and Config")
     end
 
     open_sdl_display()
@@ -53,7 +53,7 @@ defmodule HAL do
 
     ili = open_ili9342c_display("t-deck")
 
-    register_nvs_fs()
+    register_nvs_fs("Config", :pocketos)
 
     IO.puts("Mounting SD")
 
@@ -88,7 +88,7 @@ defmodule HAL do
 
     ili = open_ili9342c_display("t-pager")
 
-    register_nvs_fs()
+    register_nvs_fs("Config", :pocketos)
 
     # IO.puts("Mounting SD")
     #
@@ -119,11 +119,16 @@ defmodule HAL do
     ili
   end
 
-  defp register_nvs_fs() do
-    {:ok, _} = FSRegistry.start_link()
-    {:ok, nvs0} = NVSFS.start_link(namespace: :pocketos)
-    :ok = FSRegistry.register_fs("NVS0", nvs0)
-    IO.puts("Registered fs: NVS namespace pocketos as NVS0")
+  defp register_nvs_fs(name, namespace) do
+    case FSRegistry.start_link() do
+      {:ok, _} -> :ok
+      {:error, {:already_started, _}} -> :ok
+    end
+
+    {:ok, fs} = NVSFS.start_link(namespace: namespace)
+    :ok = FSRegistry.register_fs(name, fs)
+    IO.puts("Registered fs: NVS namespace #{namespace} as #{name}")
+    fs
   end
 
   defp open_sdl_display do

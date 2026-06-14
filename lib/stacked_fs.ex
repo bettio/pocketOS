@@ -79,7 +79,10 @@ defmodule StackedFS do
       %{open_files: %{^ref => file}} ->
         result =
           if @build_env == :test do
-            :file.write(file, bytes)
+            case :file.write(file, bytes) do
+              :ok -> {:ok, byte_size(bytes)}
+              error -> error
+            end
           else
             :atomvm.posix_write(file, bytes)
           end
@@ -107,6 +110,25 @@ defmodule StackedFS do
       _ ->
         {:reply, :ok, state}
     end
+  end
+
+  def handle_call({:delete, file_path}, _from, state) do
+    %{base_path: base_path} = state
+
+    complete_path =
+      case file_path do
+        "/" <> rest -> base_path <> rest
+        _ -> base_path <> file_path
+      end
+
+    result =
+      if @build_env == :test do
+        :file.delete(complete_path)
+      else
+        :atomvm.posix_unlink(complete_path)
+      end
+
+    {:reply, result, state}
   end
 
   def handle_cast(_msg, state) do
