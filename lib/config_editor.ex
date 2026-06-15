@@ -215,23 +215,32 @@ defmodule UI.ConfigEditor do
 
   defp list_model do
     rows =
-      Enum.flat_map(@domains, fn domain ->
+      @domains
+      |> Enum.flat_map(fn domain ->
         {:ok, values} = PocketOS.Config.load(domain)
 
         domain
         |> PocketOS.Config.schema()
         |> Map.keys()
         |> Enum.map(fn key ->
-          %{
-            id: {:edit, domain, key},
-            text: "#{domain}.#{key}=#{display(Map.get(values, key))}",
-            source: @key_icon
-          }
+          label = "#{domain}.#{key}"
+
+          {{rank(key), label},
+           %{
+             id: {:edit, domain, key},
+             text: "#{label}=#{display(Map.get(values, key))}",
+             source: @key_icon
+           }}
         end)
       end)
+      |> :lists.sort()
+      |> Enum.map(fn {_sort_key, row} -> row end)
 
     [%{id: :exit, text: "Exit", source: @back_icon} | rows]
   end
+
+  defp rank(:enabled), do: 0
+  defp rank(_), do: 1
 
   defp choice_model(%{type: :bool}), do: choice_rows([true, false])
   defp choice_model(%{type: :enum, values: vals}), do: choice_rows(vals)
