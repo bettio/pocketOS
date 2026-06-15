@@ -3,8 +3,6 @@ defmodule Main do
   @compile {:no_warn_undefined, :ahttp_client}
   @compile {:no_warn_undefined, :avm_pubsub}
   @compile {:no_warn_undefined, :network}
-  @compile {:no_warn_undefined, :sexp_lexer}
-  @compile {:no_warn_undefined, :sexp_parser}
   @compile {:no_warn_undefined, :port}
 
   def start() do
@@ -41,29 +39,29 @@ defmodule Main do
   end
 
   defp maybe_start_network() do
-    with {:ok, file} <- PocketOS.File.open("FS0:/wifi.sxp", [:read]),
-         {:ok, data} <- PocketOS.File.read(file, 1024) do
-      creds =
-        data
-        |> :sexp_lexer.string()
-        |> :sexp_parser.parse()
-        |> Enum.map(&List.to_tuple/1)
+    {:ok, net} = PocketOS.Config.load(:network)
 
-      IO.puts(~s(Will connect to "#{creds[:ssid]}".))
+    case Map.get(net, :wifi_ssid) do
+      nil ->
+        :ok
 
-      case :network.wait_for_sta(creds) do
-        :ok ->
-          IO.puts("WLAN AP ready. Waiting connections.\n")
-          :ok
+      ssid ->
+        creds = [ssid: ssid, psk: Map.get(net, :wifi_psk, "")]
+        IO.puts(~s(Will connect to "#{ssid}".))
 
-        {:ok, {_address, _netmask, _gateway} = ips} ->
-          IO.puts("Acquired IP address:  #{inspect(ips)}\n")
-          :ok
+        case :network.wait_for_sta(creds) do
+          :ok ->
+            IO.puts("WLAN AP ready. Waiting connections.\n")
+            :ok
 
-        error ->
-          IO.puts("An error occurred starting network: #{inspect(error)}\n")
-          :ok
-      end
+          {:ok, {_address, _netmask, _gateway} = ips} ->
+            IO.puts("Acquired IP address:  #{inspect(ips)}\n")
+            :ok
+
+          error ->
+            IO.puts("An error occurred starting network: #{inspect(error)}\n")
+            :ok
+        end
     end
   end
 
