@@ -658,6 +658,29 @@ defmodule MeshtasticServerCoreTest do
     assert p.relay_node == :meshtastic.relay_node_byte(@us)
   end
 
+  test "default_hop_limit opt sets the originated hop" do
+    {:ok, c2, []} =
+      :meshtastic_server_core.handle_send(
+        @broadcast,
+        text_data("x"),
+        env(),
+        core(default_hop_limit: 7)
+      )
+
+    {p, _} = decode_wire(hd(drain(c2)))
+    assert p.hop_start == 7
+    assert p.hop_limit == 7
+  end
+
+  test "enable_relay false suppresses a rebroadcast" do
+    packet = rx_packet(%{dest: @broadcast, next_hop: 0, hop_limit: 3})
+
+    {:ok, core2, _} =
+      :meshtastic_server_core.handle_rx(packet, @attrs, env(), core(enable_relay: false))
+
+    assert drain(core2) == []
+  end
+
   test "a packet directed at us (next_hop == our byte) is forwarded as a flood, not delivered" do
     our_byte = :meshtastic.relay_node_byte(@us)
     packet = rx_packet(%{dest: 0x11112222, next_hop: our_byte})

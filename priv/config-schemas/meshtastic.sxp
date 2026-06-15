@@ -6,5 +6,4 @@
  (hop_limit (type int) (default 3))
  (rebroadcast (type bool) (default true))
  (channel_name (type string))
- (channel_psk (type string))
- (position_precision_bits (type int) (nvs precision)))
+ (channel_psk (type string)))

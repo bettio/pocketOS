@@ -70,7 +70,12 @@ defmodule RadioLauncher do
       spreading_factor: Map.fetch!(complete_config, :spreading_factor),
       bandwidth_hz: Map.fetch!(complete_config, :bandwidth_hz),
       coding_rate: Map.fetch!(complete_config, :coding_rate),
-      preamble_length: Map.fetch!(complete_config, :preamble_length)
+      preamble_length: Map.fetch!(complete_config, :preamble_length),
+      periodic_interval_ms: Map.fetch!(mt_cfg, :node_info_interval_s) * 1000,
+      default_hop_limit: Map.fetch!(mt_cfg, :hop_limit),
+      node_info_want_response: Map.fetch!(mt_cfg, :want_response_broadcast),
+      ok_to_mqtt_bitfield: bool_to_bit(Map.fetch!(mt_cfg, :ok_to_mqtt)),
+      enable_relay: Map.fetch!(mt_cfg, :rebroadcast)
     ]
 
     # One physical radio (one frequency + sync word): the preset picks the band;
@@ -138,6 +143,9 @@ defmodule RadioLauncher do
   defp role_atom(:client_mute), do: :CLIENT_MUTE
   defp role_atom(:router), do: :ROUTER
   defp role_atom(other), do: other
+
+  defp bool_to_bit(true), do: 1
+  defp bool_to_bit(false), do: 0
 
   defp handler_if(true, handler), do: [handler]
   defp handler_if(false, _handler), do: []

@@ -56,6 +56,11 @@
     bandwidth_hz = 250000 :: pos_integer(),
     coding_rate = 5 :: 5..8,
     preamble_length = 16 :: pos_integer(),
+    periodic_interval_ms = 60000 :: pos_integer(),
+    default_hop_limit = 3 :: pos_integer(),
+    node_info_want_response = true :: boolean(),
+    ok_to_mqtt_bitfield = 1 :: non_neg_integer(),
+    enable_relay = true :: boolean(),
     %% delivery-tracked sends awaiting an ack, keyed by packet_id
     pending = #{} :: map()
 }).
@@ -178,7 +183,14 @@ init(MeshtasticOpts, InitialRolling) ->
         spreading_factor = Sf,
         bandwidth_hz = BwHz,
         coding_rate = coding_rate_denominator(proplists:get_value(coding_rate, MeshtasticOpts)),
-        preamble_length = preamble_symbols(proplists:get_value(preamble_length, MeshtasticOpts))
+        preamble_length = preamble_symbols(proplists:get_value(preamble_length, MeshtasticOpts)),
+        periodic_interval_ms = proplists:get_value(periodic_interval_ms, MeshtasticOpts, ?PERIODIC_MS),
+        default_hop_limit = proplists:get_value(default_hop_limit, MeshtasticOpts, 3),
+        node_info_want_response = proplists:get_value(node_info_want_response, MeshtasticOpts, true),
+        ok_to_mqtt_bitfield = proplists:get_value(
+            ok_to_mqtt_bitfield, MeshtasticOpts, ?OK_TO_MQTT_BITFIELD
+        ),
+        enable_relay = proplists:get_value(enable_relay, MeshtasticOpts, true)
     },
     {Core, [{set_timer, ?INITIAL_PERIODIC_MS, periodic}]}.
 
@@ -353,7 +365,7 @@ traceroute_reply(
         portnum => 'TRACEROUTE_APP',
         payload => Route1,
         request_id => OrigPid,
-        bitfield => ?OK_TO_MQTT_BITFIELD
+        bitfield => Core#core.ok_to_mqtt_bitfield
     },
     Bin = erlang:iolist_to_binary(meshtastic_proto:encode(Data)),
     ?MESH_TRACE("[mesh] traceroute reply -> src=~p req=~p snr=~p~n", [Src, OrigPid, SnrByte]),
@@ -419,7 +431,7 @@ ack_reply(
             %% An ack/reply that itself wants an ack: never ack it in full
             ack_the_ack(Packet, Env, Core);
         false ->
-            AckBin = ack_data(OrigPid),
+            AckBin = ack_data(OrigPid, Core#core.ok_to_mqtt_bitfield),
             case Message of
                 #{portnum := 'TEXT_MESSAGE_APP'} ->
                     %% meshtastic acks text DMs reliably (tracked want_ack send)
@@ -443,17 +455,17 @@ ack_the_ack(
     case hops_taken(Packet) =:= 0 orelse NextHop =:= meshtastic:relay_node_byte(NodeId) of
         true ->
             ?MESH_TRACE("[mesh] 0-hop ack-the-ack pid=~p -> src=~p~n", [OrigPid, Src]),
-            {originate(Src, ack_data(OrigPid), #{hop => 0}, Env, Core), []};
+            {originate(Src, ack_data(OrigPid, Core#core.ok_to_mqtt_bitfield), #{hop => 0}, Env, Core), []};
         false ->
             {Core, []}
     end.
 
-ack_data(RequestId) ->
+ack_data(RequestId, Bitfield) ->
     AckData = #{
         portnum => 'ROUTING_APP',
         payload => #{error_reason => 'NONE'},
         request_id => RequestId,
-        bitfield => ?OK_TO_MQTT_BITFIELD
+        bitfield => Bitfield
     },
     erlang:iolist_to_binary(meshtastic_proto:encode(AckData)).
 
@@ -462,6 +474,9 @@ ack_data(RequestId) ->
 %% flood, while a packet that named us as the next hop is re-directed toward its
 %% dest from our learned routes (else falls back to flooding). Skipped for
 %% unicasts to us, exhausted hop limits, and packets directed at another named hop.
+enqueue_rebroadcast(_Packet, _MaybeMessage, _Attributes, _Env, #core{enable_relay = false} = Core) ->
+    ?MESH_TRACE("[mesh] rebroadcast skip (relay disabled)~n", []),
+    Core;
 enqueue_rebroadcast(
     #{dest := Dest} = _Packet, _MaybeMessage, _Attributes, _Env, #core{node_id = Dest} = Core
 ) ->
@@ -635,7 +650,7 @@ dupe_re_ack(
     case hops_taken(Packet) of
         0 ->
             ?MESH_TRACE("[mesh] re-ack dupe pid=~p -> src=~p~n", [OrigPid, Src]),
-            originate(Src, ack_data(OrigPid), #{hop => 0}, Env, Core);
+            originate(Src, ack_data(OrigPid, Core#core.ok_to_mqtt_bitfield), #{hop => 0}, Env, Core);
         _ ->
             Core
     end;
@@ -712,15 +727,20 @@ can_send_pki(#core{private_key = Priv}) -> Priv =/= undefined.
 -spec handle_periodic(env(), core_state()) -> {core_state(), [effect()]}.
 handle_periodic(Env, #core{node_info = #{user_info := _UserInfo}} = Core) ->
     ?MESH_TRACE("[mesh] periodic node_info broadcast~n", []),
-    Core1 = send_node_info(?BROADCAST_ADDR, #{want_response => true}, Env, Core),
-    {Core1, [{set_timer, ?PERIODIC_MS, periodic}]};
+    Extra =
+        case Core#core.node_info_want_response of
+            true -> #{want_response => true};
+            false -> #{}
+        end,
+    Core1 = send_node_info(?BROADCAST_ADDR, Extra, Env, Core),
+    {Core1, [{set_timer, Core#core.periodic_interval_ms, periodic}]};
 handle_periodic(_Env, Core) ->
     ?MESH_TRACE("[mesh] periodic skip (no user_info)~n", []),
     {Core, []}.
 
 send_node_info(Dest, Extra, Env, #core{node_info = #{user_info := UserInfo}} = Core) ->
     Data = maps:merge(
-        #{portnum => 'NODEINFO_APP', payload => UserInfo, bitfield => ?OK_TO_MQTT_BITFIELD},
+        #{portnum => 'NODEINFO_APP', payload => UserInfo, bitfield => Core#core.ok_to_mqtt_bitfield},
         Extra
     ),
     Bin = erlang:iolist_to_binary(meshtastic_proto:encode(Data)),
@@ -781,7 +801,7 @@ build_packet(Dest, Data, Opts, Env, #core{
     {PacketId, NextRolling} = next_packet_id(Rolling, Rand22),
     RelayByte = meshtastic:relay_node_byte(NodeId),
     {ChannelHash, Encrypt} = tx_crypto(Dest, Env, Core),
-    Hop = maps:get(hop, Opts, 3),
+    Hop = maps:get(hop, Opts, Core#core.default_hop_limit),
     Packet = #{
         dest => Dest,
         src => NodeId,
