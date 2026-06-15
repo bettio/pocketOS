@@ -518,7 +518,8 @@ defmodule PhotonUI.Widgets.TextInputState do
   def update_property(%TextInputState{} = s, property, value) do
     case property do
       :text ->
-        %TextInputState{s | text: to_string(value), cursor_pos: 0}
+        text = to_string(value)
+        %TextInputState{s | text: text, cursor_pos: byte_size(text)}
     end
   end
 
