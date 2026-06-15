@@ -44,7 +44,7 @@ defmodule RadioLauncher do
     IO.puts("Node info is: #{inspect(meshtastic_node_info)}")
 
     channel_name = Map.get(mt_cfg, :channel_name, Map.get(preset_rf, :channel_name, "LongFast"))
-    channel = :meshtastic.default_channel(channel_name)
+    channel = build_channel(channel_name, Map.get(mt_cfg, :channel_psk))
 
     meshcore_identity =
       case ed_keypair do
@@ -150,6 +150,14 @@ defmodule RadioLauncher do
 
   defp bool_to_bit(true), do: 1
   defp bool_to_bit(false), do: 0
+
+  defp build_channel(name, nil), do: :meshtastic.default_channel(name)
+
+  defp build_channel(name, psk_b64) when is_binary(psk_b64) do
+    %{name: name, psk: :base64.decode(psk_b64)}
+  rescue
+    _ -> :meshtastic.default_channel(name)
+  end
 
   defp mc_channel_key(%{channel_key: hex}) when is_binary(hex) and byte_size(hex) > 0 do
     try do
