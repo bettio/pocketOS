@@ -1,0 +1,6 @@
+((enabled (type bool) (default false))
+ (node_type (type enum) (values chat repeater room_server sensor) (default chat))
+ (advert_interval_s (type int) (default 60) (nvs adv_secs))
+ (channel_key (type string))
+ (discover_response (type bool) (default true) (nvs discover))
+ (name (type string)))

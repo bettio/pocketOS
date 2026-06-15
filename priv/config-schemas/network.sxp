@@ -1,0 +1,2 @@
+((wifi_ssid (type string))
+ (wifi_psk (type string)))
