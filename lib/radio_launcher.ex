@@ -161,23 +161,13 @@ defmodule RadioLauncher do
 
   defp mc_channel_key(%{channel_key: hex}) when is_binary(hex) and byte_size(hex) > 0 do
     try do
-      hex_to_bin(hex)
+      Base.decode16!(hex, case: :mixed)
     rescue
       _ -> :meshcore_protocol.default_public_channel_key()
     end
   end
 
   defp mc_channel_key(_), do: :meshcore_protocol.default_public_channel_key()
-
-  defp hex_to_bin(hex), do: hex_to_bin(hex, <<>>)
-  defp hex_to_bin(<<>>, acc), do: acc
-
-  defp hex_to_bin(<<h, l, rest::binary>>, acc),
-    do: hex_to_bin(rest, <<acc::binary, nibble(h) * 16 + nibble(l)>>)
-
-  defp nibble(c) when c in ?0..?9, do: c - ?0
-  defp nibble(c) when c in ?a..?f, do: c - ?a + 10
-  defp nibble(c) when c in ?A..?F, do: c - ?A + 10
 
   defp handler_if(true, handler), do: [handler]
   defp handler_if(false, _handler), do: []
