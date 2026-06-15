@@ -120,6 +120,12 @@ defmodule UI.Menu do
       args: []
     },
     %{
+      source: {:pocket_os, "icons/apps/radio.rgba"},
+      text: "Config",
+      app: UI.ConfigEditor,
+      args: []
+    },
+    %{
       source: {:pocket_os, "icons/apps/shut_down.rgba"},
       text: "Shut Down",
       app: UI.ShutDown,
