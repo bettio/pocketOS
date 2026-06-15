@@ -51,7 +51,10 @@
     spreading_factor = 11 :: pos_integer(),
     bandwidth_hz = 250000 :: pos_integer(),
     coding_rate = 5 :: 5..8,
-    preamble_length = 16 :: pos_integer()
+    preamble_length = 16 :: pos_integer(),
+    advert_interval_ms = 60000 :: pos_integer(),
+    answer_discover = true :: boolean(),
+    node_type = chat :: atom()
 }).
 
 -opaque core_state() :: #core{}.
@@ -113,7 +116,10 @@ init(Opts) ->
         spreading_factor = proplists:get_value(spreading_factor, Opts, 11),
         bandwidth_hz = proplists:get_value(bandwidth_hz, Opts, 250000),
         coding_rate = coding_rate_denominator(proplists:get_value(coding_rate, Opts)),
-        preamble_length = proplists:get_value(preamble_length, Opts, 16)
+        preamble_length = proplists:get_value(preamble_length, Opts, 16),
+        advert_interval_ms = proplists:get_value(advert_interval_ms, Opts, ?PERIODIC_MS),
+        answer_discover = proplists:get_value(answer_discover, Opts, true),
+        node_type = proplists:get_value(node_type, Opts, ?NODE_TYPE)
     },
     {Core, periodic_effects(Core)}.
 
@@ -354,14 +360,14 @@ oldest_contact([_ | T], Oldest) ->
 handle_periodic(#{wall_s := NowS}, Core) ->
     case can_advertise(Core) of
         true ->
-            {enqueue_advert(NowS, Core), [{set_timer, ?PERIODIC_MS, periodic}]};
+            {enqueue_advert(NowS, Core), [{set_timer, Core#core.advert_interval_ms, periodic}]};
         false ->
             ?MESH_TRACE("[meshcore] periodic skip (no identity)~n", []),
             {Core, []}
     end.
 
 enqueue_advert(NowS, #core{public_key = Pub, private_key = Priv, name = Name} = Core) ->
-    AppData = meshcore_protocol:encode_advert_appdata(#{node_type => ?NODE_TYPE, name => Name}),
+    AppData = meshcore_protocol:encode_advert_appdata(#{node_type => Core#core.node_type, name => Name}),
     Advert = meshcore_protocol:sign_advert(
         #{
             route => flood,
@@ -395,7 +401,7 @@ maybe_reply_discover(
     },
     Attributes,
     Env,
-    #core{public_key = Pub} = Core
+    #core{public_key = Pub, answer_discover = true} = Core
 ) when is_binary(Pub) ->
     NowMs = maps:get(mono_ms, Env),
     case rl_allow(NowMs, Core#core.discover_rl) of
@@ -403,12 +409,12 @@ maybe_reply_discover(
             ?MESH_TRACE("[meshcore] discover reply rate-limited tag=~p~n", [Tag]),
             Core#core{discover_rl = Rl};
         {true, Rl} ->
-            case responds_to(Filter, ?NODE_TYPE) of
+            case responds_to(Filter, Core#core.node_type) of
                 false ->
                     ?MESH_TRACE("[meshcore] discover skip tag=~p filter=~p~n", [Tag, Filter]),
                     Core#core{discover_rl = Rl};
                 true ->
-                    Resp = discover_resp(Tag, PrefixOnly, Attributes, Pub),
+                    Resp = discover_resp(Tag, PrefixOnly, Attributes, Pub, Core#core.node_type),
                     Payload = meshcore_protocol:serialize(Resp),
                     Rand = maps:get(rand22, Env),
                     Delay = discover_reply_delay(byte_size(Payload), Rand, Core),
@@ -427,7 +433,7 @@ maybe_reply_discover(_Packet, _Attributes, _Env, Core) ->
 
 %% Build a DISCOVER_RESP: our node type, the SNR we heard the request at (x4),
 %% the echoed tag, and our key (8-byte prefix when the request asks).
-discover_resp(Tag, PrefixOnly, Attributes, Pub) ->
+discover_resp(Tag, PrefixOnly, Attributes, Pub, NodeType) ->
     Key =
         case PrefixOnly of
             true ->
@@ -443,7 +449,7 @@ discover_resp(Tag, PrefixOnly, Attributes, Pub) ->
         hash_size => 1,
         path => <<>>,
         sub_type => discover_resp,
-        node_type => ?NODE_TYPE,
+        node_type => NodeType,
         reported_snr => snr_byte(maps:get(snr, Attributes, undefined)),
         tag => Tag,
         public_key => Key

@@ -86,6 +86,20 @@ defmodule MeshcoreServerCoreTest do
     assert drain(c) == []
   end
 
+  test "advert_interval_ms opt sets the re-arm interval" do
+    c = core(identity_opts() ++ [advert_interval_ms: 120_000])
+    {_core, effects} = :meshcore_server_core.handle_periodic(%{wall_s: 1}, c)
+    assert effects == [{:set_timer, 120_000, :periodic}]
+  end
+
+  test "node_type opt is reflected in the advert" do
+    c = core(identity_opts() ++ [node_type: :repeater])
+    {core2, _} = :meshcore_server_core.handle_periodic(%{wall_s: 1}, c)
+    [wire] = drain(core2)
+    {:ok, adv} = :meshcore_protocol.parse(wire)
+    assert adv.node_type == :repeater
+  end
+
   # ---- handle_send_group_text ----
 
   test "send group text enqueues a flood grp_txt with our name prepended" do
@@ -531,6 +545,13 @@ defmodule MeshcoreServerCoreTest do
     {:ok, req2} = :meshcore_protocol.parse(chat_scan)
     {:ok, core2, _} = :meshcore_server_core.handle_rx(req2, @attrs, tx_env(), core(opts))
     assert [_wire] = drain(core2)
+  end
+
+  test "answer_discover false suppresses the discover reply" do
+    {:ok, req} = :meshcore_protocol.parse(@control)
+    c = core(identity_opts() ++ [answer_discover: false])
+    {:ok, core1, _} = :meshcore_server_core.handle_rx(req, @attrs, tx_env(), c)
+    assert drain(core1) == []
   end
 
   test "rx rate-limits discover replies to a fixed window" do
