@@ -1,4 +1,5 @@
-((preset (type enum) (values meshtastic meshcore) (default meshtastic))
+((enabled (type bool) (default false))
+ (preset (type enum) (values meshtastic meshcore) (default meshtastic))
  (preset_name (type string) (default medium_fast))
  (preset_region (type enum)
   (values US EU_433 EU_868 CN JP ANZ ANZ_433 RU KR TW IN NZ_865 TH UA_433 UA_868

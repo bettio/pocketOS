@@ -4,6 +4,16 @@ defmodule RadioLauncher do
     MeshcoreCallbacks.init()
 
     {:ok, radi0cfg} = PocketOS.Config.load(:radi0cfg)
+
+    if Map.get(radi0cfg, :enabled, false) do
+      start_radio(radi0cfg)
+    else
+      IO.puts("[radio] disabled (radi0cfg.enabled=false)")
+      :ok
+    end
+  end
+
+  defp start_radio(radi0cfg) do
     {:ok, ident} = PocketOS.Config.load(:identity)
     {:ok, mt_cfg} = PocketOS.Config.load(:meshtastic)
     {:ok, mc_cfg} = PocketOS.Config.load(:meshcore)

@@ -10,6 +10,7 @@ defmodule PocketOS.ConfigTest do
 
   test "loads schema defaults when there are no config files" do
     {:ok, cfg} = PocketOS.Config.load(:radi0cfg)
+    assert cfg.enabled == false
     assert cfg.preset == :meshtastic
     assert cfg.preset_name == "medium_fast"
     assert cfg.preset_region == :EU_868
