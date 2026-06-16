@@ -22,6 +22,7 @@ init([#{radio_module := RadioModule} = RadioConfig, MA]) ->
     RadioId = RadioModule,
 
     {ok, Radio} = RadioModule:start(RadioConfig#{receive_handler => self()}),
+    register_radio(Radio),
 
     Handlers = lists:filtermap(
         fun({Name, Module, Args}) ->
@@ -62,4 +63,16 @@ dispatch([{HandlerModule, Handler} | Tail], Iface, Payload, Attributes) ->
         ok -> ok;
         discard -> ok;
         next -> dispatch(Tail, Iface, Payload, Attributes)
+    end.
+
+%% Stable name so the light-sleep path can reach the radio.
+register_radio(Radio) ->
+    case whereis(lora_radio) of
+        undefined -> ok;
+        _ -> unregister(lora_radio)
+    end,
+    try
+        register(lora_radio, Radio)
+    catch
+        error:badarg -> ok
     end.
