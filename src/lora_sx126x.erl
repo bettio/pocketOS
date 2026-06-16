@@ -32,7 +32,10 @@
 %%% @end
 
 %% Internal Lora provider API
--export([start/1, start_link/1, stop/1, broadcast/2, sleep/1]).
+-export([
+    start/1, start_link/1, stop/1, broadcast/2, sleep/1, prepare_for_cpu_sleep/1,
+    resume_after_cpu_sleep/1
+]).
 
 %% gen_statem
 -export([init/1, waiting_to_receive/3, waiting_tx_done/3, terminate/3]).
@@ -78,6 +81,16 @@ broadcast(Lora, Message) ->
 %% @hidden
 sleep(Lora) ->
     gen_statem:call(Lora, sleep).
+
+%% @doc Detach the IRQ handler before a CPU light sleep. The radio stays in RX
+%% so its IRQ line can serve as a wakeup source.
+prepare_for_cpu_sleep(Lora) ->
+    gen_statem:call(Lora, prepare_for_cpu_sleep).
+
+%% @doc Re-arm the IRQ handler after a CPU light sleep and drain a packet that
+%% arrived during/at wake.
+resume_after_cpu_sleep(Lora) ->
+    gen_statem:call(Lora, resume_after_cpu_sleep).
 
 %%%
 %%% gen_statem implementation
@@ -181,6 +194,20 @@ waiting_to_receive({call, From}, {broadcast, Message}, State) ->
 waiting_to_receive({call, From}, sleep, State) ->
     do_sleep(State#state.spi),
     {next_state, sleep, State, [{reply, From, ok}]};
+waiting_to_receive({call, From}, prepare_for_cpu_sleep, State) ->
+    GPIO = gpio:start(),
+    maybe_remove_interrupt(GPIO, State#state.irq),
+    {next_state, waiting_to_receive, State, [{reply, From, ok}]};
+waiting_to_receive({call, From}, resume_after_cpu_sleep, #state{irq = undefined} = State) ->
+    {next_state, waiting_to_receive, State, [{reply, From, ok}]};
+waiting_to_receive({call, From}, resume_after_cpu_sleep, #state{irq = Pin} = State) ->
+    GPIO = gpio:start(),
+    maybe_set_interrupt(GPIO, rising, Pin),
+    case gpio:digital_read(Pin) of
+        low -> ok;
+        high -> do_receive(State)
+    end,
+    {next_state, waiting_to_receive, State, [{reply, From, ok}]};
 waiting_to_receive({call, From}, Request, State) ->
     ?TRACE("Unhandled call in waiting_to_receive state.  Request: ~p", [Request]),
     {next_state, waiting_to_receive, State, [{reply, From, {error, unknown_request}}]};
@@ -221,6 +248,10 @@ waiting_tx_done(state_timeout, ErrorMessage, State) ->
     NewState = State#state{pending = undefined},
     ?TRACE("going back into receive state.  Will reply with ErrorMessage=~p", [ErrorMessage]),
     {next_state, waiting_to_receive, NewState, [{reply, State#state.pending, ErrorMessage}]};
+waiting_tx_done({call, From}, prepare_for_cpu_sleep, State) ->
+    {next_state, waiting_tx_done, State, [{reply, From, ok}]};
+waiting_tx_done({call, From}, resume_after_cpu_sleep, State) ->
+    {next_state, waiting_tx_done, State, [{reply, From, ok}]};
 waiting_tx_done({call, From}, Request, State) ->
     ?TRACE("Illegal call in waiting_tx_done state.  Request: ~p~n", [Request]),
     {next_state, waiting_tx_done, State, [{reply, From, {error, busy_waiting_tx_done}}]};
@@ -350,6 +381,13 @@ maybe_set_interrupt(GPIO, Trigger, Pin) ->
     ?TRACE("maybe_set_interrupt on pin ~p for trigger ~p~n", [Pin, Trigger]),
     gpio:set_pin_pull(Pin, down),
     gpio:set_int(GPIO, Pin, Trigger).
+
+%% @private
+maybe_remove_interrupt(_GPIO, undefined) ->
+    ok;
+maybe_remove_interrupt(GPIO, Pin) ->
+    ?TRACE("maybe_remove_interrupt on pin ~p~n", [Pin]),
+    gpio:remove_int(GPIO, Pin).
 
 %% @private
 maybe_reset(undefined) ->
