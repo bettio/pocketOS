@@ -424,6 +424,18 @@ defmodule HAL do
     {:ok, %{device: "UART1", options: [tx_pin: 12, rx_pin: 4, speed: 38400]}}
   end
 
+  def set_backlight(state), do: set_backlight(@platform, state)
+
+  defp set_backlight(p, :on) when p in ["t-deck", "t-pager"], do: :gpio.digital_write(42, :high)
+  defp set_backlight(p, :off) when p in ["t-deck", "t-pager"], do: :gpio.digital_write(42, :low)
+  defp set_backlight(_p, _state), do: :ok
+
+  def button_wakeup_sources(), do: button_wakeup_sources(@platform)
+
+  defp button_wakeup_sources("t-deck"), do: [{0, :low}]
+  defp button_wakeup_sources("t-pager"), do: [{7, :low}]
+  defp button_wakeup_sources(_), do: []
+
   def unique_id_256(namespace) do
     unique_id_256(@platform, namespace)
   end
