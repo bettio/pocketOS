@@ -16,7 +16,10 @@ defmodule UI.ShutDown do
 
     actions =
       power_off_button(:erlang.whereis(:pm)) ++
-        [%Button{name: :cancel, x: 0, y: 48, height: 32, width: 240, text: "Cancel"}]
+        [
+          %Button{name: :sleep, x: 0, y: 0, height: 32, width: 240, text: "Sleep"},
+          %Button{name: :cancel, x: 0, y: 48, height: 32, width: 240, text: "Cancel"}
+        ]
 
     [
       %VerticalLayout{
@@ -112,6 +115,11 @@ defmodule UI.ShutDown do
     end
 
     {:noreply, state}
+  end
+
+  def handle_event(:sleep, :clicked, _ui, state) do
+    PocketOS.Power.light_sleep()
+    {:stop, :normal, state}
   end
 
   def handle_event(:cancel, :clicked, _ui, state) do
