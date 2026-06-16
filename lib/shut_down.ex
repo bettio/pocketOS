@@ -14,6 +14,10 @@ defmodule UI.ShutDown do
         _ -> "~~~ K"
       end
 
+    actions =
+      power_off_button(:erlang.whereis(:pm)) ++
+        [%Button{name: :cancel, x: 0, y: 48, height: 32, width: 240, text: "Cancel"}]
+
     [
       %VerticalLayout{
         name: :vl,
@@ -58,26 +62,17 @@ defmodule UI.ShutDown do
                 bgcolor: 0x000000
               }
             ]
-          },
-          %Button{
-            name: :power_off,
-            x: 0,
-            y: 0,
-            height: 32,
-            width: 240,
-            text: "Power Off"
-          },
-          %Button{
-            name: :cancel,
-            x: 0,
-            y: 48,
-            height: 32,
-            width: 240,
-            text: "Cancel"
           }
+          | actions
         ]
       }
     ]
+  end
+
+  defp power_off_button(:undefined), do: []
+
+  defp power_off_button(_pm) do
+    [%Button{name: :power_off, x: 0, y: 0, height: 32, width: 240, text: "Power Off"}]
   end
 
   def start_link(args, opts) do
