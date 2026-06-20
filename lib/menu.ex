@@ -90,12 +90,6 @@ defmodule UI.Menu do
     #      args: [mfa: {WASMLauncher, :start, ["wasi_hello_world.wasm"]}]
     #    },
     %{
-      source: {:pocket_os, "icons/apps/terminal.rgba"},
-      text: "Lora Mon",
-      app: UI.Terminal,
-      args: [mf: {CLIApps.LoraMonitor, :start}]
-    },
-    %{
       source: {:pocket_os, "icons/apps/mail.rgba"},
       text: "MeshMsgs",
       app: UI.MeshMessages,
