@@ -160,6 +160,7 @@ defmodule PhotonUI.Widgets.IconListView do
       model
       |> Enum.slice(page * rows_per_page, rows_per_page)
       |> Enum.reduce({0, acc}, fn v, {index, grid_acc} ->
+        global_index = index + page * rows_per_page
         x_pos = origin_x + x
         y_pos = origin_y + y + cell_height * index
         icon_xpos = x_pos + 8
@@ -168,7 +169,7 @@ defmodule PhotonUI.Widgets.IconListView do
         text_ypos = y_pos + div(cell_height - 16, 2)
 
         {text_color, bg_color, with_background} =
-          if index + page * rows_per_page == selected_index do
+          if global_index == selected_index do
             color =
               if state == :released do
                 0x0000FF
@@ -184,7 +185,7 @@ defmodule PhotonUI.Widgets.IconListView do
         {index + 1,
          [
            {:text, text_xpos, text_ypos, :default16px, text_color, bg_color, v[:text]},
-           {:image, icon_xpos, icon_ypos, bg_color, images[index]}
+           {:image, icon_xpos, icon_ypos, bg_color, images[global_index]}
            | with_background
          ]}
       end)
@@ -312,7 +313,8 @@ defmodule PhotonUI.Widgets.IconGridView do
       model
       |> Enum.slice(page * icons_per_page, icons_per_page)
       |> Enum.reduce({0, acc}, fn v, {index, grid_acc} ->
-        img = images[index]
+        global_index = index + page * icons_per_page
+        img = images[global_index]
         txt = v[:text]
         x_pos = origin_x + x + cell_width * rem(index, cols)
         y_pos = origin_y + y + cell_height * div(index, cols)
@@ -322,7 +324,7 @@ defmodule PhotonUI.Widgets.IconGridView do
         text_ypos = y_pos + 16 + icon_size
 
         {text_color, bg_color, with_background} =
-          if index + page * icons_per_page == selected_index do
+          if global_index == selected_index do
             color =
               if state == :released do
                 0x0000FF
