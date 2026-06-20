@@ -108,7 +108,7 @@ defmodule UI.Menu do
       args: []
     },
     %{
-      source: {:pocket_os, "icons/apps/radio.rgba"},
+      source: {:pocket_os, "icons/apps/beacon.rgba"},
       text: "Traceroute",
       app: UI.Traceroute,
       args: []
@@ -120,7 +120,7 @@ defmodule UI.Menu do
       args: []
     },
     %{
-      source: {:pocket_os, "icons/apps/radio.rgba"},
+      source: {:pocket_os, "icons/apps/folder_prefs.rgba"},
       text: "Config",
       app: UI.ConfigEditor,
       args: []

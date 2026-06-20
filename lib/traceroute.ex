@@ -162,7 +162,7 @@ defmodule UI.Traceroute do
       %{
         id: :trace_again,
         text: "Trace again",
-        source: {:pocket_os, "icons/32/generic/new_mail.rgba"}
+        source: {:pocket_os, "icons/32/generic/beacon.rgba"}
       }
     ]
 

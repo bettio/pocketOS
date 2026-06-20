@@ -10,7 +10,7 @@ alias PhotonUI.UIServer
 defmodule UI.ConfigEditor do
   @domains [:radi0cfg, :identity, :meshtastic, :meshcore, :network]
 
-  @key_icon {:pocket_os, "icons/32/generic/new_mail.rgba"}
+  @key_icon {:pocket_os, "icons/32/generic/misc_box.rgba"}
   @choice_icon {:pocket_os, "icons/32/generic/mail_doc.rgba"}
   @back_icon {:pocket_os, "icons/32/generic/go_back.rgba"}
 
